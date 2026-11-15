@@ -1,8 +1,8 @@
 {
   "schema_version": 2,
   "name": "memory-shape",
-  "started_at": "2026-11-08T23:11:45Z",
-  "finished_at": "2026-11-08T23:16:10Z",
+  "started_at": "2026-11-15T01:31:27Z",
+  "finished_at": "2026-11-15T01:37:24Z",
   "workload": {
     "kind": "memory-shape"
   },
@@ -13,7 +13,7 @@
     "text_indexes": 0,
     "point_indexes": 0,
     "range_indexes": 0,
-    "uri": "/tmp/memory-shape-loadtest-20261108T231144",
+    "uri": "/tmp/memory-shape-loadtest-20261115T013126",
     "container_memory_bytes": 2147483648
   },
   "shapes": [
@@ -23,10 +23,10 @@
       "nodes": 0,
       "relationships": 0,
       "logical_bytes": 258,
-      "disk_bytes": 769,
-      "rss_bytes": 12144640,
-      "peak_rss_bytes": 12197888,
-      "baseline_rss_bytes": 12144640,
+      "disk_bytes": 827,
+      "rss_bytes": 13033472,
+      "peak_rss_bytes": 13045760,
+      "baseline_rss_bytes": 13033472,
       "attributed_rss_bytes": 0,
       "ratio": 0.0,
       "scenario": {
@@ -41,18 +41,18 @@
       "index": "none",
       "nodes": 120000,
       "relationships": 0,
-      "logical_bytes": 27286276,
-      "disk_bytes": 2041295,
-      "rss_bytes": 50786304,
-      "peak_rss_bytes": 50835456,
-      "baseline_rss_bytes": 12144640,
-      "attributed_rss_bytes": 38641664,
-      "ratio": 1.4161574851767973,
+      "logical_bytes": 27286424,
+      "disk_bytes": 1321690,
+      "rss_bytes": 52514816,
+      "peak_rss_bytes": 52563968,
+      "baseline_rss_bytes": 12935168,
+      "attributed_rss_bytes": 39579648,
+      "ratio": 1.4505252868606013,
       "scenario": {
         "given": "an empty relate serve, 1 integer properties on every node, text indexes 0, point indexes 0, range indexes 0, and a 32.00 MB logical ceiling.",
         "when": "the flat shape is loaded to 120000 nodes and 0 relationships, then checkpointed. The child RSS is sampled.",
         "then": "the database holds those counts. The load finishes under the ceiling. Logical bytes, disk, attributed RSS, and the ratio stay inside the frozen boundaries.",
-        "outcome": "loaded 120000 nodes and 0 relationships. Logical 26.02 MB, disk 1.95 MB, attributed RSS 36.85 MB, ratio 1.416x."
+        "outcome": "loaded 120000 nodes and 0 relationships. Logical 26.02 MB, disk 1.26 MB, attributed RSS 37.75 MB, ratio 1.451x."
       }
     },
     {
@@ -60,18 +60,18 @@
       "index": "none",
       "nodes": 52016,
       "relationships": 52000,
-      "logical_bytes": 30015298,
-      "disk_bytes": 1837437,
-      "rss_bytes": 50774016,
-      "peak_rss_bytes": 50831360,
-      "baseline_rss_bytes": 12144640,
-      "attributed_rss_bytes": 38629376,
-      "ratio": 1.2869895877762068,
+      "logical_bytes": 28765546,
+      "disk_bytes": 1150769,
+      "rss_bytes": 50847744,
+      "peak_rss_bytes": 51761152,
+      "baseline_rss_bytes": 13012992,
+      "attributed_rss_bytes": 37834752,
+      "ratio": 1.3152801618992387,
       "scenario": {
         "given": "an empty relate serve, 1 integer properties on every node, text indexes 0, point indexes 0, range indexes 0, and a 32.00 MB logical ceiling.",
         "when": "the fanout shape is loaded to 52016 nodes and 52000 relationships, then checkpointed. The child RSS is sampled.",
         "then": "the database holds those counts. The load finishes under the ceiling. Logical bytes, disk, attributed RSS, and the ratio stay inside the frozen boundaries.",
-        "outcome": "loaded 52016 nodes and 52000 relationships. Logical 28.62 MB, disk 1.75 MB, attributed RSS 36.84 MB, ratio 1.287x."
+        "outcome": "loaded 52016 nodes and 52000 relationships. Logical 27.43 MB, disk 1.10 MB, attributed RSS 36.08 MB, ratio 1.315x."
       }
     },
     {
@@ -79,18 +79,18 @@
       "index": "none",
       "nodes": 46000,
       "relationships": 46000,
-      "logical_bytes": 31442900,
-      "disk_bytes": 1850979,
-      "rss_bytes": 49672192,
-      "peak_rss_bytes": 49745920,
-      "baseline_rss_bytes": 12144640,
-      "attributed_rss_bytes": 37527552,
-      "ratio": 1.1935143386901335,
+      "logical_bytes": 31443048,
+      "disk_bytes": 1260285,
+      "rss_bytes": 50880512,
+      "peak_rss_bytes": 51224576,
+      "baseline_rss_bytes": 12988416,
+      "attributed_rss_bytes": 37892096,
+      "ratio": 1.2051025078739186,
       "scenario": {
         "given": "an empty relate serve, 1 integer properties on every node, text indexes 0, point indexes 0, range indexes 0, and a 32.00 MB logical ceiling.",
         "when": "the ring shape is loaded to 46000 nodes and 46000 relationships, then checkpointed. The child RSS is sampled.",
         "then": "the database holds those counts. The load finishes under the ceiling. Logical bytes, disk, attributed RSS, and the ratio stay inside the frozen boundaries.",
-        "outcome": "loaded 46000 nodes and 46000 relationships. Logical 29.99 MB, disk 1.77 MB, attributed RSS 35.79 MB, ratio 1.194x."
+        "outcome": "loaded 46000 nodes and 46000 relationships. Logical 29.99 MB, disk 1.20 MB, attributed RSS 36.14 MB, ratio 1.205x."
       }
     },
     {
@@ -98,18 +98,37 @@
       "index": "none",
       "nodes": 5000,
       "relationships": 100000,
-      "logical_bytes": 32931406,
-      "disk_bytes": 1699957,
-      "rss_bytes": 46108672,
-      "peak_rss_bytes": 46182400,
-      "baseline_rss_bytes": 12369920,
-      "attributed_rss_bytes": 33738752,
-      "ratio": 1.0245159893871523,
+      "logical_bytes": 32620994,
+      "disk_bytes": 770507,
+      "rss_bytes": 46661632,
+      "peak_rss_bytes": 47841280,
+      "baseline_rss_bytes": 12935168,
+      "attributed_rss_bytes": 33726464,
+      "ratio": 1.0338882990506053,
       "scenario": {
         "given": "an empty relate serve, 1 integer properties on every node, text indexes 0, point indexes 0, range indexes 0, and a 32.00 MB logical ceiling.",
         "when": "the dense ring shape is loaded to 5000 nodes and 100000 relationships, then checkpointed. The child RSS is sampled.",
         "then": "the database holds those counts. The load finishes under the ceiling. Logical bytes, disk, attributed RSS, and the ratio stay inside the frozen boundaries.",
-        "outcome": "loaded 5000 nodes and 100000 relationships. Logical 31.41 MB, disk 1.62 MB, attributed RSS 32.18 MB, ratio 1.025x."
+        "outcome": "loaded 5000 nodes and 100000 relationships. Logical 31.11 MB, disk 0.73 MB, attributed RSS 32.16 MB, ratio 1.034x."
+      }
+    },
+    {
+      "shape": "mid degree",
+      "index": "none",
+      "nodes": 1184,
+      "relationships": 113664,
+      "logical_bytes": 24971234,
+      "disk_bytes": 917199,
+      "rss_bytes": 47312896,
+      "peak_rss_bytes": 47394816,
+      "baseline_rss_bytes": 12988416,
+      "attributed_rss_bytes": 34324480,
+      "ratio": 1.3745608246672951,
+      "scenario": {
+        "given": "an empty relate serve, 1 integer properties on every node, text indexes 0, point indexes 0, range indexes 0, and a 32.00 MB logical ceiling.",
+        "when": "the mid degree shape is loaded to 1184 nodes and 113664 relationships, then checkpointed. The child RSS is sampled.",
+        "then": "the database holds those counts. The load finishes under the ceiling. Logical bytes, disk, attributed RSS, and the ratio stay inside the frozen boundaries.",
+        "outcome": "loaded 1184 nodes and 113664 relationships. Logical 23.81 MB, disk 0.87 MB, attributed RSS 32.73 MB, ratio 1.375x."
       }
     }
   ],

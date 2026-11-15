@@ -1,15 +1,15 @@
 {
   "schema_version": 6,
   "name": "identity-mixed-iam",
-  "started_at": "2026-11-08T23:11:04.419Z",
-  "finished_at": "2026-11-08T23:11:41.669Z",
-  "started_at_unix_ms": 1794179464419,
-  "finished_at_unix_ms": 1794179501669,
-  "duration_ms": 37249,
-  "load_duration_ms": 3609,
-  "worker_duration_ms": 33639,
+  "started_at": "2026-11-15T01:30:52.173Z",
+  "finished_at": "2026-11-15T01:31:23.470Z",
+  "started_at_unix_ms": 1794706252173,
+  "finished_at_unix_ms": 1794706283470,
+  "duration_ms": 31296,
+  "load_duration_ms": 3129,
+  "worker_duration_ms": 28165,
   "engine": "relate",
-  "engine_version": "0.16.1",
+  "engine_version": "1.0.2",
   "config": {
     "uri": ":memory:",
     "scale": 0.1,
@@ -68,62 +68,62 @@
         "users": 1015
       },
       "finish": {
-        "nodes": 3398,
-        "relationships": 8394,
+        "nodes": 3387,
+        "relationships": 8367,
         "groups": 54,
-        "memberships": 5199,
+        "memberships": 5183,
         "roles": 5,
         "users": 2390
       }
     }
   },
   "throughput": {
-    "ops_per_sec": 573.5095919479254,
-    "reads_per_sec": 330.42004815838754,
-    "writes_per_sec": 264.12794672849964,
-    "read_ops": 11115,
-    "write_ops": 8885
+    "ops_per_sec": 695.7489737702638,
+    "reads_per_sec": 394.6742410793538,
+    "writes_per_sec": 315.4269483401385,
+    "read_ops": 11116,
+    "write_ops": 8884
   },
   "memory": {
     "after_open": {
-      "rss_bytes": 12509184,
-      "peak_rss_bytes": 12390400,
+      "rss_bytes": 13172736,
+      "peak_rss_bytes": 13049856,
       "rss_per_node": 0.0,
       "rss_per_relationship": 0.0,
       "rss_per_entity": 0.0,
       "rss_per_unit": 0.0
     },
     "start": {
-      "rss_bytes": 25149440,
-      "peak_rss_bytes": 24842240,
-      "rss_per_node": 19896.708860759492,
-      "rss_per_relationship": 9165.247813411079,
-      "rss_per_entity": 6274.810379241517,
-      "rss_per_unit": 24777.77339901478
+      "rss_bytes": 22904832,
+      "peak_rss_bytes": 22597632,
+      "rss_per_node": 18120.91139240506,
+      "rss_per_relationship": 8347.241982507288,
+      "rss_per_entity": 5714.7784431137725,
+      "rss_per_unit": 22566.336945812807
     },
     "finish": {
-      "rss_bytes": 36675584,
-      "peak_rss_bytes": 37326848,
-      "rss_per_node": 10793.285462036492,
-      "rss_per_relationship": 4369.2618537050275,
-      "rss_per_entity": 3110.208955223881,
-      "rss_per_unit": 15345.432635983263
+      "rss_bytes": 34795520,
+      "peak_rss_bytes": 35323904,
+      "rss_per_node": 10273.256569235311,
+      "rss_per_relationship": 4158.661407912035,
+      "rss_per_entity": 2960.3130849072654,
+      "rss_per_unit": 14558.794979079497
     },
     "graph": {
-      "rss_bytes": 12640256,
-      "bytes_per_node": 10000.20253164557,
-      "bytes_per_relationship": 4606.507288629738,
-      "bytes_per_entity": 3153.756487025948,
-      "bytes_per_unit": 12453.454187192117
+      "rss_bytes": 9732096,
+      "bytes_per_node": 7699.443037974684,
+      "bytes_per_relationship": 3546.6822157434403,
+      "bytes_per_entity": 2428.1676646706587,
+      "bytes_per_unit": 9588.271921182266
     },
     "workload_delta": {
-      "rss_bytes": 11526144,
-      "nodes": 2134,
-      "relationships": 5650,
-      "rss_bytes_per_new_entity": 1480.7482014388488
+      "rss_bytes": 11890688,
+      "nodes": 2123,
+      "relationships": 5623,
+      "rss_bytes_per_new_entity": 1535.0746191582753
     },
-    "logical_used_start_bytes": 1981535,
-    "logical_used_bytes": 7167614,
+    "logical_used_start_bytes": 1982423,
+    "logical_used_bytes": 7398546,
     "logical_limit_bytes": 41943040
   },
   "usecases": [
@@ -136,12 +136,12 @@
       "errors": 0,
       "statements": 1373,
       "latency_ns": {
-        "min": 240698,
-        "max": 20528907,
-        "mean": 3420561.181354698,
-        "p50": 2897944,
-        "p95": 8933087,
-        "p99": 10997986
+        "min": 290102,
+        "max": 16005667,
+        "mean": 3093220.258557902,
+        "p50": 2247781,
+        "p95": 8236471,
+        "p99": 9941728
       }
     },
     {
@@ -149,16 +149,16 @@
       "kind": "write",
       "related": false,
       "description": "Directory: MERGE a user into a group",
-      "ops": 1775,
+      "ops": 1774,
       "errors": 0,
-      "statements": 1775,
+      "statements": 1774,
       "latency_ns": {
-        "min": 1248977,
-        "max": 24567784,
-        "mean": 8282527.734647888,
-        "p50": 8477144,
-        "p95": 15100171,
-        "p99": 18565875
+        "min": 1132025,
+        "max": 20272027,
+        "mean": 6803120.915445321,
+        "p50": 7192811,
+        "p95": 11702814,
+        "p99": 16283683
       }
     },
     {
@@ -170,12 +170,12 @@
       "errors": 0,
       "statements": 1079,
       "latency_ns": {
-        "min": 1250367,
-        "max": 22610915,
-        "mean": 8189250.322520853,
-        "p50": 8272937,
-        "p95": 15933331,
-        "p99": 18515904
+        "min": 1095998,
+        "max": 21352370,
+        "mean": 6706725.902687673,
+        "p50": 6926257,
+        "p95": 11921181,
+        "p99": 16382007
       }
     },
     {
@@ -183,16 +183,16 @@
       "kind": "write",
       "related": false,
       "description": "Device: CREATE Device and OWNS",
-      "ops": 907,
+      "ops": 905,
       "errors": 0,
-      "statements": 907,
+      "statements": 905,
       "latency_ns": {
-        "min": 1492680,
-        "max": 23078105,
-        "mean": 8521150.403528115,
-        "p50": 8798330,
-        "p95": 15663990,
-        "p99": 18877788
+        "min": 1110105,
+        "max": 19747071,
+        "mean": 6908107.31160221,
+        "p50": 7395872,
+        "p95": 12286651,
+        "p99": 16356626
       }
     },
     {
@@ -204,12 +204,12 @@
       "errors": 0,
       "statements": 736,
       "latency_ns": {
-        "min": 1330764,
-        "max": 27626457,
-        "mean": 8249881.751358695,
-        "p50": 8511030,
-        "p95": 16193910,
-        "p99": 19408795
+        "min": 1152574,
+        "max": 20000264,
+        "mean": 6662473.823369565,
+        "p50": 7001563,
+        "p95": 11986681,
+        "p99": 16471137
       }
     },
     {
@@ -217,16 +217,16 @@
       "kind": "read",
       "related": false,
       "description": "Effective access: direct HAS_ROLE UNION inherited MEMBER_OF* roles",
-      "ops": 2173,
+      "ops": 2172,
       "errors": 0,
-      "statements": 2173,
+      "statements": 2172,
       "latency_ns": {
-        "min": 1395952,
-        "max": 39575319,
-        "mean": 9737556.34790612,
-        "p50": 9615621,
-        "p95": 19128102,
-        "p99": 25248566
+        "min": 1289480,
+        "max": 31145369,
+        "mean": 8005312.943830571,
+        "p50": 8089040,
+        "p95": 16105838,
+        "p99": 19006292
       }
     },
     {
@@ -234,16 +234,16 @@
       "kind": "read",
       "related": false,
       "description": "Org walk: REPORTS_TO* managers",
-      "ops": 1387,
+      "ops": 1386,
       "errors": 0,
-      "statements": 1387,
+      "statements": 1386,
       "latency_ns": {
-        "min": 1150107,
-        "max": 28564871,
-        "mean": 8069627.785868782,
-        "p50": 8090932,
-        "p95": 16531242,
-        "p99": 19937089
+        "min": 1020046,
+        "max": 20665794,
+        "mean": 6225865.955988456,
+        "p50": 6459886,
+        "p95": 11426557,
+        "p99": 16546113
       }
     },
     {
@@ -251,16 +251,16 @@
       "kind": "read",
       "related": false,
       "description": "OPTIONAL MATCH manager and device",
-      "ops": 1312,
+      "ops": 1313,
       "errors": 0,
-      "statements": 1312,
+      "statements": 1313,
       "latency_ns": {
-        "min": 1133262,
-        "max": 28999177,
-        "mean": 8036216.262957317,
-        "p50": 8056935,
-        "p95": 16241038,
-        "p99": 19997293
+        "min": 1037830,
+        "max": 20390870,
+        "mean": 6283464.571972582,
+        "p50": 6702465,
+        "p95": 11751593,
+        "p99": 16271598
       }
     },
     {
@@ -268,16 +268,16 @@
       "kind": "read",
       "related": true,
       "description": "IAM: admin via nested MEMBER_OF* from planted nested-admin",
-      "ops": 810,
+      "ops": 809,
       "errors": 0,
-      "statements": 810,
+      "statements": 809,
       "latency_ns": {
-        "min": 1140082,
-        "max": 26019850,
-        "mean": 7962333.466666667,
-        "p50": 8050371,
-        "p95": 16008103,
-        "p99": 19974506
+        "min": 1049672,
+        "max": 23511138,
+        "mean": 6157073.085290482,
+        "p50": 6240582,
+        "p95": 12428066,
+        "p99": 16373244
       }
     },
     {
@@ -289,12 +289,12 @@
       "errors": 0,
       "statements": 817,
       "latency_ns": {
-        "min": 1165963,
-        "max": 29684494,
-        "mean": 8028743.787025704,
-        "p50": 8076514,
-        "p95": 16265681,
-        "p99": 19600194
+        "min": 1063688,
+        "max": 20987713,
+        "mean": 6242864.774785802,
+        "p50": 6555258,
+        "p95": 11475708,
+        "p99": 16564185
       }
     },
     {
@@ -302,16 +302,16 @@
       "kind": "read",
       "related": true,
       "description": "IAM: HAS_ROLE.until before a cutoff on planted stale-grant",
-      "ops": 827,
+      "ops": 828,
       "errors": 0,
-      "statements": 827,
+      "statements": 828,
       "latency_ns": {
-        "min": 496999,
-        "max": 18483276,
-        "mean": 4709374.220072552,
-        "p50": 3449934,
-        "p95": 10800014,
-        "p99": 15061204
+        "min": 552122,
+        "max": 19997194,
+        "mean": 4788693.356280194,
+        "p50": 3719821,
+        "p95": 10060633,
+        "p99": 15761453
       }
     },
     {
@@ -319,16 +319,16 @@
       "kind": "read",
       "related": false,
       "description": "Directory search: User.email CONTAINS a user number",
-      "ops": 1147,
+      "ops": 1148,
       "errors": 0,
-      "statements": 1147,
+      "statements": 1148,
       "latency_ns": {
-        "min": 268424,
-        "max": 17608019,
-        "mean": 2738138.414123801,
-        "p50": 1552775,
-        "p95": 8687583,
-        "p99": 10908806
+        "min": 304699,
+        "max": 15408989,
+        "mean": 2318954.628919861,
+        "p50": 1241140,
+        "p95": 7725319,
+        "p99": 10016221
       }
     },
     {
@@ -336,16 +336,16 @@
       "kind": "read",
       "related": false,
       "description": "Group members: ORDER BY name SKIP/LIMIT",
-      "ops": 1047,
+      "ops": 1046,
       "errors": 0,
-      "statements": 1047,
+      "statements": 1046,
       "latency_ns": {
-        "min": 224191,
-        "max": 10003666,
-        "mean": 1295502.3132760266,
-        "p50": 607419,
-        "p95": 5995521,
-        "p99": 7716936
+        "min": 226263,
+        "max": 10140766,
+        "mean": 1192517.5965583173,
+        "p50": 555478,
+        "p95": 5682198,
+        "p99": 7648758
       }
     },
     {
@@ -357,12 +357,12 @@
       "errors": 0,
       "statements": 801,
       "latency_ns": {
-        "min": 1091869,
-        "max": 27472820,
-        "mean": 7900112.878901374,
-        "p50": 7971028,
-        "p95": 16239544,
-        "p99": 20021237
+        "min": 1013334,
+        "max": 20766398,
+        "mean": 6204525.375780275,
+        "p50": 6369081,
+        "p95": 11165282,
+        "p99": 17378218
       }
     },
     {
@@ -370,16 +370,16 @@
       "kind": "read",
       "related": false,
       "description": "shortestPath between two users over REPORTS_TO",
-      "ops": 794,
+      "ops": 796,
       "errors": 0,
-      "statements": 794,
+      "statements": 796,
       "latency_ns": {
-        "min": 2248642,
-        "max": 40103139,
-        "mean": 13072792.079345088,
-        "p50": 11829257,
-        "p95": 24617953,
-        "p99": 30979925
+        "min": 1997965,
+        "max": 29999091,
+        "mean": 10093932.503768845,
+        "p50": 9849677,
+        "p95": 19003868,
+        "p99": 22161299
       }
     },
     {
@@ -387,16 +387,16 @@
       "kind": "write",
       "related": false,
       "description": "Offboard: SET User.status",
-      "ops": 644,
+      "ops": 645,
       "errors": 0,
-      "statements": 644,
+      "statements": 645,
       "latency_ns": {
-        "min": 1360068,
-        "max": 24238459,
-        "mean": 8557413.767080745,
-        "p50": 8731428,
-        "p95": 16000025,
-        "p99": 19500178
+        "min": 1343230,
+        "max": 19984556,
+        "mean": 7028512.386046512,
+        "p50": 7471211,
+        "p95": 11870292,
+        "p99": 17064261
       }
     },
     {
@@ -404,16 +404,16 @@
       "kind": "write",
       "related": false,
       "description": "Alias: SET emails list append",
-      "ops": 710,
+      "ops": 711,
       "errors": 0,
-      "statements": 710,
+      "statements": 711,
       "latency_ns": {
-        "min": 1399845,
-        "max": 26913529,
-        "mean": 8448411.48169014,
-        "p50": 8756302,
-        "p95": 15882138,
-        "p99": 19988104
+        "min": 1042919,
+        "max": 20159547,
+        "mean": 6954109.523206751,
+        "p50": 7468587,
+        "p95": 12501284,
+        "p99": 16152932
       }
     },
     {
@@ -425,12 +425,12 @@
       "errors": 0,
       "statements": 674,
       "latency_ns": {
-        "min": 188418,
-        "max": 13531705,
-        "mean": 1246928.8738872404,
-        "p50": 466411,
-        "p95": 5684632,
-        "p99": 8100604
+        "min": 215122,
+        "max": 9994059,
+        "mean": 1158183.796735905,
+        "p50": 463045,
+        "p95": 5603537,
+        "p99": 7818291
       }
     },
     {
@@ -442,12 +442,12 @@
       "errors": 0,
       "statements": 538,
       "latency_ns": {
-        "min": 450487,
-        "max": 19354288,
-        "mean": 4502576.399628253,
-        "p50": 3577033,
-        "p95": 10006192,
-        "p99": 14794200
+        "min": 412040,
+        "max": 16517842,
+        "mean": 4356687.539033458,
+        "p50": 3187096,
+        "p95": 9990622,
+        "p99": 13321558
       }
     },
     {
@@ -459,12 +459,12 @@
       "errors": 0,
       "statements": 449,
       "latency_ns": {
-        "min": 1184589,
-        "max": 21024270,
-        "mean": 7066778.385300668,
-        "p50": 7285875,
-        "p95": 14595247,
-        "p99": 17388418
+        "min": 1065512,
+        "max": 17588178,
+        "mean": 5969787.922048998,
+        "p50": 6227763,
+        "p95": 10744899,
+        "p99": 15593924
       }
     }
   ],
