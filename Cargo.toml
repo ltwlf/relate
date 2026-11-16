@@ -148,7 +148,7 @@ pyo3 = { version = "0.23", features = ["extension-module"] }
 # embedded Relate already use.
 arrow = { version = "54", features = ["json"] }
 arrow-array = "54"
-arrow-schema = "54"
+arrow-schema = "60"
 arrow-ipc = "54"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "io-util", "sync", "time", "signal"] }
 base64 = "0.22"
