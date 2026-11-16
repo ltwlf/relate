@@ -13,6 +13,18 @@ pub const CHILDREN: &str = "children";
 pub const ID: &str = "Id";
 pub const DETAILS: &str = "Details";
 pub const ESTIMATED_ROWS: &str = "EstimatedRows";
+/// The fused parent operator's `Id` (virtual plan operators) — present
+/// exactly on a fused virtual child: a display-only breakdown step of its
+/// fused parent operator, never an executed one. The key's presence IS
+/// the fused fact (the `Batched` flag's presence-only shape); there is no
+/// separate flag. A fused child never carries the PROFILE metric block:
+/// rows, time and memory stay the fused parent's clause totals.
+pub const FUSED_INTO: &str = "FusedInto";
+/// The walk-side keys a fused virtual child never carries (virtual plan
+/// operators): the walk's read kinds and its phase time stay the fused
+/// parent's. The one table the fused-child parser rejects on — never a
+/// hand-listed subset at the check site.
+pub const FUSED_CHILD_NEVER: [&str; 3] = [HOPS, NEIGHBOR_WALKS, WALK_TIME_NS];
 /// PROFILE metrics (ADR-0344 phase 2).
 pub const ROWS: &str = "Rows";
 pub const TIME_NS: &str = "TimeNs";

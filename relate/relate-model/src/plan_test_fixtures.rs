@@ -8,6 +8,18 @@
 use crate::wire::plan_keys;
 use crate::{CypherValue, IndexMap};
 
+/// The mutable args map of a hand-built wire node — the one unwrap
+/// preamble every fused/wire test shares, never a per-test copy.
+pub(crate) fn args_mut(node: &mut CypherValue) -> &mut IndexMap<String, CypherValue> {
+    let CypherValue::Map(entries) = node else {
+        unreachable!("the fixture builds a map")
+    };
+    let Some(CypherValue::Map(args)) = entries.get_mut(plan_keys::ARGS) else {
+        unreachable!("the fixture builds an args map")
+    };
+    args
+}
+
 /// A hand-built plan wire node: the operator, its id, PROFILE metric args
 /// when `time_ns` carries one (the read kinds along with them, as the
 /// engine emits), and the children composed in.
@@ -62,12 +74,7 @@ pub(crate) fn plan_seek_wire_node(
     id: i64,
 ) -> CypherValue {
     let mut node = plan_wire_node(operator, id, None, vec![]);
-    let CypherValue::Map(entries) = &mut node else {
-        unreachable!("plan_wire_node builds a map")
-    };
-    let Some(CypherValue::Map(args)) = entries.get_mut(plan_keys::ARGS) else {
-        unreachable!("plan_wire_node builds the args map")
-    };
+    let args = args_mut(&mut node);
     args.insert(
         plan_keys::DETAILS.to_string(),
         CypherValue::Str(line.into()),

@@ -6,6 +6,9 @@
 //! own module (`plan_keys.rs`), and the typed warning vocabulary beside it
 //! (LABS-461: `plan_warning.rs`), parsed here by the node accessor.
 
+use super::plan_args::{
+    metric_group_ints, metric_set_ints, optional_bool, optional_fraction, optional_int,
+};
 use super::plan_keys;
 use super::plan_warning::PlanWarning;
 use crate::CypherValue;
@@ -250,6 +253,14 @@ pub struct PlanNodeWire<'a> {
     /// break that fails loudly at the accessor, never a silently
     /// dropped warning.
     pub warnings: Vec<PlanWarning>,
+    /// The fused virtual child fact (virtual plan operators): `Some` on
+    /// a display-only breakdown step of its fused parent operator, never
+    /// an executed one — the parent link and the step's own measured
+    /// pair (the seek step's seek-phase time and node reads; `None` on a
+    /// hop step, which no real per-hop counter measures) travel
+    /// together, so the half-states are unrepresentable. Never the
+    /// parent's rows, time or memory.
+    pub fused: Option<super::plan_fused::FusedChildWire>,
 }
 
 impl PlanNodeWire<'_> {
@@ -312,6 +323,11 @@ pub fn plan_node_wire(value: &CypherValue) -> PlanNodeWire<'_> {
         ),
     };
     let estimated_rows = optional_int(args, plan_keys::ESTIMATED_ROWS);
+    // Virtual plan operators: the fused fact gates the metric groups — a
+    // fused child carries only the step's own measured pair, so the
+    // ride-along groups (the phase times, the read kinds) stay the fused
+    // parent's and never parse here.
+    let fused = super::plan_fused::fused_child(args);
     // The five scalar metrics ride the module's one all-or-none,
     // non-negative group policy; their presence *is* the metric-set fact.
     let scalars = metric_group_ints(
@@ -324,37 +340,52 @@ pub fn plan_node_wire(value: &CypherValue) -> PlanNodeWire<'_> {
             plan_keys::EXPRESSION_BUILT_BYTES,
         ],
     );
+    if fused.is_some() && scalars.is_some() {
+        panic!(
+            "a fused plan wire child never carries the PROFILE metric block \
+             (virtual plan operators) — rows, time and memory stay the \
+             fused parent's"
+        );
+    }
     let has_metrics = scalars.is_some();
     // LABS-448: the phase times ride the metric set with the kinds,
     // through the one group policy.
-    let phases = metric_set_ints(
-        args,
-        &[plan_keys::SEEK_TIME_NS, plan_keys::WALK_TIME_NS],
-        has_metrics,
-    )
-    .map(|values| PlanPhasesWire {
-        seek_ns: values[0],
-        walk_ns: values[1],
-    })
-    .unwrap_or_default();
+    let phases = if fused.is_some() {
+        PlanPhasesWire::default()
+    } else {
+        metric_set_ints(
+            args,
+            &[plan_keys::SEEK_TIME_NS, plan_keys::WALK_TIME_NS],
+            has_metrics,
+        )
+        .map(|values| PlanPhasesWire {
+            seek_ns: values[0],
+            walk_ns: values[1],
+        })
+        .unwrap_or_default()
+    };
     // LABS-369: the read-kind mix rides the metric set, through the one
     // group policy the phase times share — one spelling, never a
     // hand-rolled copy per field family.
-    let reads = metric_set_ints(
-        args,
-        &[
-            plan_keys::HOPS,
-            plan_keys::NEIGHBOR_WALKS,
-            plan_keys::NODE_READS,
-        ],
-        has_metrics,
-    )
-    .map(|values| PlanReadsWire {
-        hops: values[0],
-        neighbor_walks: values[1],
-        node_reads: values[2],
-    })
-    .unwrap_or_default();
+    let reads = if fused.is_some() {
+        PlanReadsWire::default()
+    } else {
+        metric_set_ints(
+            args,
+            &[
+                plan_keys::HOPS,
+                plan_keys::NEIGHBOR_WALKS,
+                plan_keys::NODE_READS,
+            ],
+            has_metrics,
+        )
+        .map(|values| PlanReadsWire {
+            hops: values[0],
+            neighbor_walks: values[1],
+            node_reads: values[2],
+        })
+        .unwrap_or_default()
+    };
     // The walk's chosen start (LABS-369): the element, direction and
     // reason class, present only when the clause walked a pattern —
     // emitted together, like the metric set.
@@ -655,6 +686,7 @@ pub fn plan_node_wire(value: &CypherValue) -> PlanNodeWire<'_> {
         identifiers,
         children,
         warnings,
+        fused,
     }
 }
 
@@ -731,70 +763,6 @@ pub fn profiled_facts(
     }
 }
 
-/// The rides-the-metric-set group policy (one loud spelling, never a
-/// hand-rolled copy per field family): the keys' values are an
-/// all-or-none group of non-negative integers, present only when the
-/// metric set is — a partial group, a group without metrics, or a
-/// negative value is a wire-contract break kept loud. `None` when the
-/// whole group is absent (an EXPLAIN node).
-fn metric_set_ints(
-    args: &crate::IndexMap<String, CypherValue>,
-    keys: &[&str],
-    has_metrics: bool,
-) -> Option<Vec<i64>> {
-    match (has_metrics, metric_group_ints(args, keys)) {
-        (false, None) => None,
-        (true, Some(values)) => Some(values),
-        (false, Some(_)) => panic!(
-            "plan wire {keys:?} are present without the metric fields \
-             (all-or-none group policy)"
-        ),
-        (true, None) => panic!(
-            "plan wire {keys:?} are absent from the metric fields \
-             (all-or-none group policy)"
-        ),
-    }
-}
-
-/// The all-or-none, non-negative group read — `metric_set_ints` minus its
-/// metric-set gate, so the scalar metric block and the riding families
-/// (read kinds, phase times) share one extraction policy. A partial group
-/// or a negative value is a wire-contract break kept loud; `None` when
-/// every key is absent.
-fn metric_group_ints(
-    args: &crate::IndexMap<String, CypherValue>,
-    keys: &[&str],
-) -> Option<Vec<i64>> {
-    let values: Vec<Option<i64>> = keys.iter().map(|k| optional_int(args, k)).collect();
-    let any_present = values.iter().any(Option::is_some);
-    let all_present = values.iter().all(Option::is_some);
-    match (any_present, all_present) {
-        (false, _) => None,
-        (true, false) => panic!(
-            "plan wire {keys:?} are an all-or-none group, got a partial group: \
-             values={values:?}"
-        ),
-        (true, true) => {
-            if let Some((key, value)) = keys
-                .iter()
-                .zip(&values)
-                .find_map(|(key, value)| value.filter(|n| *n < 0).map(|n| (*key, n)))
-            {
-                panic!(
-                    "plan wire {key} is non-negative when present, got {value} \
-                     (all-or-none non-negative group)"
-                );
-            }
-            Some(
-                values
-                    .into_iter()
-                    .map(|v| v.expect("the group is all-present"))
-                    .collect(),
-            )
-        }
-    }
-}
-
 impl PlanNodeWire<'_> {
     /// The node's input-row count (LABS-343's structural fact): the first
     /// child's produced rows — the bottom-up nesting puts each earlier
@@ -808,43 +776,10 @@ impl PlanNodeWire<'_> {
     }
 }
 
-/// The optional-integer arg — one extraction policy for every optional
-/// metric key: absent or an integer, a malformed value fails loudly.
-fn optional_int(args: &crate::IndexMap<String, CypherValue>, key: &str) -> Option<i64> {
-    match args.get(key) {
-        None => None,
-        Some(CypherValue::Int(n)) => Some(*n),
-        other => panic!("plan wire {key} is an integer when present (ADR-0345), got {other:?}"),
-    }
-}
-
-/// The optional-boolean arg — the same policy as [`optional_int`] for the
-/// one boolean fact (LABS-369's walk direction).
-fn optional_bool(args: &crate::IndexMap<String, CypherValue>, key: &str) -> Option<bool> {
-    match args.get(key) {
-        None => None,
-        Some(CypherValue::Bool(flag)) => Some(*flag),
-        other => panic!("plan wire {key} is a boolean when present (LABS-369), got {other:?}"),
-    }
-}
-
-/// The optional-fraction arg — [`optional_int`]'s policy for the one
-/// float metric (the frontier budget fraction, ADR-0516): absent or a
-/// non-negative float, a malformed value fails loudly.
-fn optional_fraction(args: &crate::IndexMap<String, CypherValue>, key: &str) -> Option<f64> {
-    match args.get(key) {
-        None => None,
-        Some(CypherValue::Float(fraction)) if *fraction >= 0.0 => Some(*fraction),
-        other => {
-            panic!("plan wire {key} is a non-negative float when present (ADR-0516), got {other:?}")
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::wire::plan_test_fixtures::{plan_seek_wire_node, plan_wire_node};
+    use crate::wire::plan_test_fixtures::{args_mut, plan_seek_wire_node, plan_wire_node};
 
     /// LABS-1117: a chain rung without its hop count is the same
     /// half-state the start trio rejects — the strict parse fails loudly
@@ -855,13 +790,7 @@ mod tests {
     )]
     fn a_chain_rung_without_its_hop_count_fails_the_parse() {
         let mut node = plan_wire_node("Match", 0, Some(1), vec![]);
-        let CypherValue::Map(entries) = &mut node else {
-            unreachable!("the fixture builds a map")
-        };
-        let Some(CypherValue::Map(args)) = entries.get_mut(plan_keys::ARGS) else {
-            unreachable!("the fixture builds an args map")
-        };
-        args.insert(
+        args_mut(&mut node).insert(
             plan_keys::KERNEL_RUNG.to_string(),
             CypherValue::Str("chain".into()),
         );

@@ -43,7 +43,10 @@ pub(super) const NODE_BY_LABEL_SEEK: &str = "NodeByLabelSeek";
 /// never prices a narrated seek at anything but the seek's count. The
 /// count is `None` for the per-row keyed lookup (LABS-1083): a
 /// row-bound predicate has no pre-execution count, so the estimate
-/// keeps the fused path's.
+/// keeps the fused path's. `Clone`: the fused breakdown (virtual plan
+/// operators) holds the seek while the clause builder keeps its own for
+/// the estimate and warnings.
+#[derive(Clone)]
 pub(super) struct IndexSeek {
     /// [`NODE_INDEX_SEEK`] (the anchored-equality point read),
     /// [`NODE_INDEX_SEEK_BY_RANGE`] (the v1 comparison window), or

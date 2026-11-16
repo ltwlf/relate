@@ -14,12 +14,14 @@
 
 #[cfg(test)]
 mod fixtures;
+mod fused;
 mod notifications;
 mod seek;
 mod serialize;
 mod subject;
 mod warning;
 
+pub use fused::{FusedChild, FusedChildMetrics};
 pub use warning::PlanWarning;
 
 pub(crate) use notifications::{pattern_has_unbounded_expansion, tree_notifications};
@@ -91,6 +93,13 @@ pub struct PlanNode {
     /// (chain/hub-star/frontier/walker) is a runtime fact and lives on
     /// [`ClauseMetrics::kernel`].
     pub pattern_engine: Option<relate_executor::PatternEngine>,
+    /// The fused virtual child fact (virtual plan operators): `Some` on
+    /// a display-only breakdown step of its fused parent operator — the
+    /// seek step of an index-seek-started MATCH or one hop's `Expand`
+    /// step, never an executed one — `None` on every other node. The
+    /// parent link and the step's measured pair travel together inside
+    /// [`FusedChild`], so the half-states are unrepresentable.
+    pub fused: Option<FusedChild>,
 }
 
 /// The PROFILE metrics collected per `(stage, part, clause)` — one
@@ -308,6 +317,7 @@ impl PlanNode {
             statement_echo: String::new(),
             token_estimate: None,
             pattern_engine: None,
+            fused: None,
         }
     }
 
@@ -346,6 +356,16 @@ impl PlanNode {
     /// Stamp the schedule-v1 estimate. Only the root carries it.
     pub fn with_token_estimate(mut self, estimate: Option<TokenEstimate>) -> PlanNode {
         self.token_estimate = estimate;
+        self
+    }
+
+    /// Mark the node a fused virtual child of `parent` (virtual plan
+    /// operators) — the breakdown builder's one stamp: the parent link
+    /// and the step's measured pair (the seek step's own; `None` on a
+    /// hop step and on EXPLAIN trees) are set together, so the
+    /// half-state is unrepresentable.
+    pub fn with_fused(mut self, parent: usize, metrics: Option<FusedChildMetrics>) -> PlanNode {
+        self.fused = Some(FusedChild { parent, metrics });
         self
     }
 
@@ -517,12 +537,17 @@ fn stage_node(
 }
 
 /// The pipeline of one plan part: one node per clause, the projection
-/// outermost, each earlier clause as the child of the one after it. A part
-/// is a strict single-child chain, so clause `i` of `n` is the chain's
-/// `n - 1 - i`-th node and takes the pre-order id `base + (n - 1 - i)`.
-/// That id and the clause's operator-scoped notifications are stamped here,
-/// in the one build pass — never through a positional list zipped by a later
-/// walk.
+/// outermost, each earlier clause as the child of the one after it. The
+/// pre-order ids fall out of the build order — no layout arithmetic: the
+/// clause nodes' ids are claimed outermost-first (a clause's node
+/// precedes its chain child's subtree and its own fused breakdown
+/// steps), and the fused steps (virtual plan operators: a seek-started
+/// MATCH's seek and per-hop `Expand` steps) take theirs as the build
+/// reaches them, right behind the chain child's subtree. The breakdown
+/// rides after the chain child, so the pipeline's data-flow child stays
+/// first (the wire's input-rows fact reads it). The clause's
+/// operator-scoped notifications are staged under the node's id in the
+/// same pass — never through a positional list zipped by a later walk.
 fn part_tree(
     part: &[Clause],
     part_index: usize,
@@ -534,11 +559,19 @@ fn part_tree(
     // One node per clause, the PROFILE metrics (ADR-0344 phase 2) stamped
     // by the dispatch loop's `(stage, part, clause)` key — the same
     // positions this walk reads.
-    let clauses = part.len();
-    let base = cursor.reserve(clauses);
+    let facts: Vec<ClauseNode> = part
+        .iter()
+        .map(|clause| clause_node(clause, stats))
+        .collect();
+    // The clause nodes' pre-order ids, claimed outermost-first (the last
+    // clause's node is the part's root) and reversed onto clause order:
+    // clause `i`'s node precedes the whole subtree under it (the chain
+    // child, then its fused steps).
+    let mut ids: Vec<usize> = facts.iter().map(|_| cursor.take_id()).collect();
+    ids.reverse();
     let mut chain: Option<PlanNode> = None;
-    for (clause_index, clause) in part.iter().enumerate() {
-        let mut facts = clause_node(clause, stats);
+    for (clause_index, mut facts) in facts.into_iter().enumerate() {
+        let breakdown = facts.fused.take();
         let mut node = PlanNode::new(
             facts.operator.name(),
             facts.details,
@@ -552,7 +585,7 @@ fn part_tree(
                 .and_then(|m| m.get(&(stage, part_index, clause_index)))
                 .copied(),
         );
-        node.id = base + (clauses - 1 - clause_index);
+        node.id = ids[clause_index];
         // LABS-1117: the store's static pattern-engine rung, stamped on a
         // MATCH operator so every EXPLAIN/PROFILE tree carries it.
         node.pattern_engine = facts.pattern_engine;
@@ -569,6 +602,16 @@ fn part_tree(
         // `ProduceResults` on top).
         if let Some(child) = chain.take() {
             node.children.push(child);
+        }
+        // Virtual plan operators: the fused MATCH's breakdown steps,
+        // behind the chain child, fused into this node.
+        if let Some(breakdown) = breakdown {
+            node.children.extend(fused::build_children(
+                breakdown,
+                cursor,
+                node.id,
+                node.metrics,
+            ));
         }
         // The typed aggregation fact and the input child's estimate are
         // both in hand here, so the eager-buffer notification is staged
@@ -589,4 +632,4 @@ fn part_tree(
 
 mod clause;
 
-use clause::{clause_node, ClauseOperator};
+use clause::{clause_node, ClauseNode, ClauseOperator};
