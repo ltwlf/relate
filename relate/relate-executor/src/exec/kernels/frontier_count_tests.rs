@@ -150,7 +150,7 @@ fn branching_twelve_level_count_answers_without_enumeration() {
 
 // Every equivalence guard declines to the unchanged plan, answers the
 // DFS's own: the default pool (trail rel-uniqueness does not contract),
-// a filtered target (label, property map, MATCH WHERE, inline WHERE), a
+// a target predicate that reads another binding, a
 // DISTINCT count (the endpoint set's arm, not this one), a second item,
 // grouping, paging, a WITH between, and a non-count aggregate.
 #[test]
@@ -159,11 +159,9 @@ fn every_guard_declines_to_the_dfs() {
     let g = &built.graph;
     for cypher in [
         "MATCH (s:N {id: 0})-[:R*1..3]->(d) RETURN count(*) AS n",
-        "MATCH REPEATABLE ELEMENTS (s:N {id: 0})-[:R*1..3]->(d:N) RETURN count(*) AS n",
-        "MATCH REPEATABLE ELEMENTS (s:N {id: 0})-[:R*1..3]->(d {id: 5}) RETURN count(*) AS n",
-        "MATCH REPEATABLE ELEMENTS (s:N {id: 0})-[:R*1..3]->(d) WHERE d.id > 3 \
-         RETURN count(*) AS n",
-        "MATCH REPEATABLE ELEMENTS (s:N {id: 0})-[:R*1..3]->(d WHERE d.id > 3) \
+        // A target predicate that is not local to the arrival node (it
+        // reads the seed) is outside the closed vocabulary: it declines.
+        "MATCH REPEATABLE ELEMENTS (s:N {id: 0})-[:R*1..3]->(d) WHERE d.id > s.id \
          RETURN count(*) AS n",
         "MATCH REPEATABLE ELEMENTS (s:N {id: 0})-[:R*1..3]->(d) RETURN count(DISTINCT d) AS n",
         "MATCH REPEATABLE ELEMENTS (s:N {id: 0})-[:R*1..3]->(d) RETURN sum(d.id) AS n",
@@ -182,9 +180,50 @@ fn every_guard_declines_to_the_dfs() {
     }
 }
 
+// A filter on the target depends only on the arrival node, so the walk
+// count stays exact under it: the last leg counts the admitted
+// out-neighbours per reached pair. Every spelling of the filter (label,
+// property map, MATCH WHERE) engages the arm and matches the DFS; an
+// inline element WHERE is GPM and keeps declining. Closed forms on `layered(3, 2)` from id 0: 2, 4 and 8 walks
+// reach layers 1, 2 and 3 (ids 2-3, 4-5, 6-7), 14 in all, 4 per layer-3
+// node.
+#[test]
+fn a_target_filter_counts_the_admitted_arrivals() {
+    let built = layered(3, 2);
+    let g = &built.graph;
+    for (target, filter, walks) in [
+        ("(d:N)", "", 14),
+        ("(d:Missing)", "", 0),
+        ("(d {id: 6})", "", 4),
+        ("(d)", "WHERE d.id > 3", 12),
+        ("(d)", "WHERE d.id IS NULL", 0),
+    ] {
+        let query = format!(
+            "MATCH REPEATABLE ELEMENTS (s:N {{id: 0}})-[:R*1..3]->{target} {filter} \
+             RETURN count(*) AS n"
+        );
+        assert_eq!(engaged(g, &query), Value::Int(walks), "{query}");
+        differential(g, &query);
+    }
+    declines(
+        g,
+        "MATCH REPEATABLE ELEMENTS (s:N {id: 0})-[:R*1..3]->(d WHERE d.id > 3) \
+         RETURN count(*) AS n",
+    );
+    // The zero-length arrival is the seed itself: it counts only when it
+    // passes the target filter.
+    for (target, walks) in [("(d {id: 0})", 1), ("(d {id: 1})", 0)] {
+        let query = format!(
+            "MATCH REPEATABLE ELEMENTS (s:N {{id: 0}})-[:R*0..0]->{target} RETURN count(*) AS n"
+        );
+        differential(g, &query);
+        assert_eq!(scalar(g, &query), Value::Int(walks), "{query}");
+    }
+}
+
 // The generated differential: the rearival suite's multigraphs (parallel
 // rels, self-loops, mixed and undirected directions, both types) under
-// the walk pool, every vocabulary pattern with its target unfiltered —
+// the walk pool, every vocabulary pattern with its target unfiltered (the filtered target has its own test above) —
 // the walk count equals the DFS's row count exactly, and the default
 // pool's spelling declines. (A plain comment: rustdoc does not document
 // macro invocations.)
@@ -199,6 +238,28 @@ proptest! {
         let g = &built.graph;
         let walk = format!("MATCH REPEATABLE ELEMENTS {body} RETURN count(*) AS n");
         prop_assert_eq!(differential(g, &walk), 1, "the walk count takes {}", walk);
-        declines(g, &format!("MATCH {body} RETURN count(*) AS n"));
+        // The default pool's spelling never takes the walk count; an
+        // exact-`*k` undirected hop rides the chain count instead
+        // (LABS-1384), so the pin is the DFS's answer, not a decline.
+        let default = format!("MATCH {body} RETURN count(*) AS n");
+        let _ = take_frontier_counters();
+        let answer = exec_cypher(g, &default);
+        prop_assert_eq!(take_frontier_counters().levels, 0, "no frontier run: {}", default);
+        prop_assert_eq!(answer.rows, with_frontier_disabled(|| exec_cypher(g, &default)).rows);
+    }
+
+    // The same multigraphs with a property filter on the target: the
+    // admitted-arrival count equals the DFS's row count exactly (the
+    // generator's graph has no filter-sensitive structure beyond the
+    // ids, so the filter selects one node per case).
+    #[test]
+    fn filtered_walk_count_matches_the_dfs_on_generated_multigraphs(
+        (n, edges, seed, pattern) in multigraph_case(),
+    ) {
+        let target = (seed + 1) % n;
+        let body = pattern_body(pattern, seed).replace("(y:N)", &format!("(y:N {{id: {target}}})"));
+        let built = multigraph(n, &edges);
+        let walk = format!("MATCH REPEATABLE ELEMENTS {body} RETURN count(*) AS n");
+        differential(&built.graph, &walk);
     }
 }

@@ -19,9 +19,12 @@
 //! - the WALK pool only — a trail-enforcing mode's rel-uniqueness makes
 //!   one walk's continuation depend on its own prefix, so the count does
 //!   not contract through per-pair multiplicities;
-//! - the target unfiltered (no labels, label expression, property map,
-//!   inline or MATCH-WHERE predicate) — the degree sum counts every
-//!   arrival, so an admission on the arrival node would be skipped;
+//! - a filter on the target (labels, a property map, a MATCH-WHERE
+//!   predicate decoded onto it) depends only on the arrival node, never
+//!   on the walk prefix, so it stays exact: the last leg counts the
+//!   out-neighbours the admission passes per reached (node, state) pair
+//!   instead of the plain degree. A filter on an interior pattern node
+//!   (a guarded group state) still declines;
 //! - a deterministic NFA (the flat and group families plus their
 //!   concatenation context), so no walk counts twice;
 //! - the answer is exactly one non-DISTINCT `count` over the walk rows
@@ -37,7 +40,6 @@ use relate_ir::{Clause, MatchMode};
 
 use crate::ctx::ExecCtx;
 use crate::metrics::FrontierCounters;
-use crate::overlay::ExecGraph;
 
 use super::super::agg_fold::FoldedReturn;
 use super::super::graph_stats::GraphStats;
@@ -46,7 +48,9 @@ use super::super::pushdown::{flatten_and_owned, match_scope, Residual};
 use super::frontier_match::{compile_frontier, Consumer};
 use super::frontier_run::{seeds, single_quantified};
 use super::frontier_tables::{arms, Arm};
+use super::memo::Memoized;
 use super::nfa::FrontierNfa;
+use super::program::{Admission, NodePred};
 
 /// The fold entry, tried first among the `MATCH` folds: `clauses` starts
 /// at the `MATCH` and its `RETURN` follows. `Ok(None)` keeps every other
@@ -91,11 +95,20 @@ pub(crate) fn try_fold_walk_count(ctx: &FoldCtx<'_>) -> Result<Option<FoldedRetu
         return Ok(None);
     };
     // The compile layer already declines every non-WALK pool for this
-    // consumer, so only the target filter and determinism are checked.
-    if !contract.target.unfiltered() || !deterministic(&contract.nfa) {
+    // consumer, so only determinism is checked; the target filter rides
+    // the last leg's arrival check.
+    if !deterministic(&contract.nfa) {
         return Ok(None);
     }
     let ctx = ExecCtx::new(graph, params);
+    // The target's admission is stage-fixed, so its memo lives across the
+    // seeds; an unfiltered target skips the per-arrival check entirely.
+    let mut arrivals = ArrivalFilter {
+        ctx,
+        pred: Memoized(Admission::of(&contract.target)),
+        prepared: None,
+        open: contract.target.unfiltered(),
+    };
     let residual = Residual {
         conjuncts: &conjuncts,
         scope: &match_scope(entering, patterns),
@@ -103,7 +116,7 @@ pub(crate) fn try_fold_walk_count(ctx: &FoldCtx<'_>) -> Result<Option<FoldedRetu
     let mut total: u128 = 0;
     for seed in seeds(ctx, &contract, entering, &residual)? {
         let mut facts = FrontierCounters::default();
-        let walks = count_walks(graph, &contract.nfa, seed, &mut facts)?;
+        let walks = count_walks(&contract.nfa, seed, &mut arrivals, &mut facts)?;
         // The run's accounting, either way — the rider's one helper, so
         // the PROFILE `[frontier]` counters and the neighbor-walk read
         // mix cannot drift between the two arms.
@@ -142,6 +155,26 @@ fn deterministic(nfa: &FrontierNfa) -> bool {
         && leaving.iter().all(|&n| n <= 1)
 }
 
+/// The target's arrival check the accepting leg consults: a filter on
+/// the arrival node alone, so counting only the admitted out-neighbours
+/// keeps the contraction exact. `open` (no filter at all) answers
+/// without a store read.
+struct ArrivalFilter<'a> {
+    ctx: ExecCtx<'a>,
+    pred: Memoized<Admission<'a>>,
+    prepared: Option<<Memoized<Admission<'a>> as NodePred>::Prepared>,
+    open: bool,
+}
+
+impl ArrivalFilter<'_> {
+    fn admits(&mut self, node: NodeId) -> Result<bool> {
+        if self.open {
+            return Ok(true);
+        }
+        self.pred.admits(&mut self.prepared, self.ctx, node)
+    }
+}
+
 /// The accepted walks from `seed`: per-level (node, state)
 /// multiplicities, each level's accepting arrivals counted as the
 /// level's multiplicity times the pair's degree over the accepting
@@ -150,18 +183,22 @@ fn deterministic(nfa: &FrontierNfa) -> bool {
 /// (the matcher's mode gate declines an unbounded REPEATABLE quantifier).
 /// `facts` gathers the run's frontier counters: levels (level 0
 /// included), the (node, state) cells, the incident-edge visits, and
-/// the accepted walks as the endpoint tally.
+/// the accepted walks as the endpoint tally. An accepting arrival counts
+/// only when `arrivals` admits it (the zero-length seed arrival included).
 fn count_walks(
-    view: &ExecGraph<'_>,
     nfa: &FrontierNfa,
     seed: NodeId,
+    arrivals: &mut ArrivalFilter<'_>,
     facts: &mut FrontierCounters,
 ) -> Result<Option<u128>> {
     let max = nfa
         .max_hops
         .expect("the WALK pool is bounded: the mode gate declines an unbounded quantifier");
+    let view = arrivals.ctx.graph;
     let arms = arms(view, nfa);
-    let mut total: u128 = u128::from(nfa.min_hops == 0 && nfa.accepting[nfa.start as usize]);
+    let mut total: u128 = u128::from(
+        nfa.min_hops == 0 && nfa.accepting[nfa.start as usize] && arrivals.admits(seed)?,
+    );
     let mut level: IdMap<(NodeId, u32), u128> = IdMap::from_iter([((seed, nfa.start), 1)]);
     facts.levels = 1;
     facts.cells = 1;
@@ -173,7 +210,7 @@ fn count_walks(
         facts.levels += 1;
         if hop == max {
             // The last level is contracted, never expanded: acceptance only.
-            return match accept_last_level(view, nfa, &arms, &level, hop, total, facts)? {
+            return match accept_last_level(arrivals, nfa, &arms, &level, hop, total, facts)? {
                 Some(sum) => {
                     facts.endpoints = tally(sum);
                     Ok(Some(sum))
@@ -189,7 +226,9 @@ fn count_walks(
                 let mut degree: u128 = 0;
                 view.try_for_each_hop_resolved::<Error>(u, t.direction, &arm.types, |_, v| {
                     facts.edge_visits += 1;
-                    degree += 1;
+                    if t.accepts && arrivals.admits(v)? {
+                        degree += 1;
+                    }
                     let slot = next.entry((v, t.to)).or_insert(0);
                     match slot.checked_add(walks) {
                         Some(sum) => *slot = sum,
@@ -224,7 +263,7 @@ fn tally(total: u128) -> u64 {
 /// degree over the accepting transition, summed onto `total` — no next
 /// level is built. `None` is an overflow decline.
 fn accept_last_level(
-    view: &ExecGraph<'_>,
+    arrivals: &mut ArrivalFilter<'_>,
     nfa: &FrontierNfa,
     arms: &[Vec<Arm>],
     level: &IdMap<(NodeId, u32), u128>,
@@ -235,6 +274,7 @@ fn accept_last_level(
     if hop < nfa.min_hops {
         return Ok(Some(total));
     }
+    let view = arrivals.ctx.graph;
     for (&(u, s), &walks) in level {
         for arm in &arms[s as usize] {
             let t = &nfa.transitions[arm.transition];
@@ -242,9 +282,11 @@ fn accept_last_level(
                 continue;
             }
             let mut degree: u128 = 0;
-            view.try_for_each_hop_resolved::<Error>(u, t.direction, &arm.types, |_, _| {
+            view.try_for_each_hop_resolved::<Error>(u, t.direction, &arm.types, |_, v| {
                 facts.edge_visits += 1;
-                degree += 1;
+                if arrivals.admits(v)? {
+                    degree += 1;
+                }
                 Ok(())
             })?;
             match walks.checked_mul(degree).and_then(|w| total.checked_add(w)) {
