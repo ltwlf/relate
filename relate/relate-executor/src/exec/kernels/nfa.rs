@@ -162,6 +162,15 @@ pub(crate) struct FrontierNfa {
     /// `close` states). Empty for the prototype's two families; the
     /// runner expands them without consuming a hop.
     pub(crate) epsilons: Vec<(u32, u32)>,
+    /// [`Self::epsilons`] indexed by from state: the runner's one view of
+    /// the skip list, resolved once with the automaton (the clause), not
+    /// per run.
+    pub(crate) eps_from: Vec<Vec<u32>>,
+    /// Per-state epsilon closure (`{s}` plus epsilon-reachable states),
+    /// closed once with the automaton over [`Self::eps_from`]: the
+    /// re-arrival search's zero-cost positions, the runner's
+    /// `close_epsilons` in to-indexed form.
+    pub(crate) eps_closure: Vec<Vec<u32>>,
     /// `accepting[s]`: the walk can complete at `s` — `s` is the final
     /// state or epsilon-reaches it. The canonical acceptance fact; the
     /// transitions' `accepts` flags are derived from it. `accepting
@@ -357,9 +366,13 @@ pub(crate) fn compile(
         None => None,
         Some(max) => Some(max.checked_add(context)?),
     };
+    let eps_from = epsilon_index(states, &epsilons);
+    let eps_closure = epsilon_closure(states, &eps_from);
     Some(FrontierNfa {
         transitions,
         epsilons,
+        eps_from,
+        eps_closure,
         accepting,
         state_guards: built.state_guards,
         predicates: built.predicates,
@@ -368,6 +381,35 @@ pub(crate) fn compile(
         min_hops: spine_len.min.checked_add(context)?,
         max_hops,
     })
+}
+
+/// The epsilon edges indexed by from state.
+fn epsilon_index(states: u32, epsilons: &[(u32, u32)]) -> Vec<Vec<u32>> {
+    let mut eps_from = vec![Vec::new(); states as usize];
+    for &(from, to) in epsilons {
+        eps_from[from as usize].push(to);
+    }
+    eps_from
+}
+
+/// Each state's epsilon closure over the from-indexed skip list: the
+/// state itself plus everything reachable through skips.
+fn epsilon_closure(states: u32, eps_from: &[Vec<u32>]) -> Vec<Vec<u32>> {
+    (0..states)
+        .map(|s| {
+            let mut reach = vec![s];
+            let mut pending = vec![s];
+            while let Some(t) = pending.pop() {
+                for &to in &eps_from[t as usize] {
+                    if !reach.contains(&to) {
+                        reach.push(to);
+                        pending.push(to);
+                    }
+                }
+            }
+            reach
+        })
+        .collect()
 }
 
 /// The plain one-hop rel of the vocabulary: a static type disjunction

@@ -63,12 +63,14 @@ impl CostEstimate {
 }
 
 /// The frontier family's cost gate — see the module doc. An unbounded
-/// spine engages on shape alone, so the caller skips the gate for one
-/// (it has no maximum hop count to price). `population` is
+/// spine (`unbounded`, the compiled automaton's missing hop maximum)
+/// engages on shape alone: this gate is the rule's one owner, there being
+/// no maximum hop count to price. `population` is
 /// the store's node-id span, the ceiling on any endpoint count (an
 /// unlabeled target's estimate is the ladder's rank sentinel, an ordering
 /// fact no path count can reach).
 pub(super) fn frontier_engages(
+    unbounded: bool,
     stats: &dyn PatternStats,
     population: u128,
     conjuncts: &[Expr],
@@ -76,6 +78,9 @@ pub(super) fn frontier_engages(
     target: &NodePattern,
     elements: &[PatternElement],
 ) -> bool {
+    if unbounded {
+        return true;
+    }
     let Some(hops) = expand_max_hops(elements) else {
         // The expansion passed the estimate's hop ceiling.
         return true;

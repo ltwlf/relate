@@ -33,7 +33,8 @@ use super::super::nfa::FrontierNfa;
 /// the NFA, the runner's per-state expansion table (name-resolved
 /// transition types — the one resolver, shared with the runner, never a
 /// second copy), the per-state epsilon closure, and the search's hop
-/// window. Built once per rule (per run); each search borrows it as one
+/// window. Built once per rule (per run), over the automaton's own
+/// epsilon closure; each search borrows it as one
 /// value, so the step core takes six parameters instead of a dozen.
 pub(super) struct SeekTables<'a, 'g> {
     pub(super) view: &'a ExecGraph<'g>,
@@ -42,7 +43,7 @@ pub(super) struct SeekTables<'a, 'g> {
     /// Per-state epsilon closure (`{s}` plus epsilon-reachable states):
     /// the search's zero-cost positions, the runner's `close_epsilons`
     /// in to-indexed form.
-    pub(super) eps_closure: Vec<Vec<u32>>,
+    pub(super) eps_closure: &'a [Vec<u32>],
     pub(super) min_hops: u32,
     pub(super) depth_cap: u32,
     /// The per-state guard verdict memos (LABS-1478), per run.

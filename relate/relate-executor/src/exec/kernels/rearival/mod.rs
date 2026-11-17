@@ -156,7 +156,7 @@ use crate::overlay::ExecGraph;
 use self::search::{
     seek, NodeSimple, Position, SearchPolicy, SeekTables, Stop, TrailPolicy, WalkPolicy,
 };
-use super::frontier_tables::{epsilon_index, Arm, Chain, Parents, Step};
+use super::frontier_tables::{Arm, Chain, Parents, Step};
 use super::guard_memo::StateMemos;
 use super::nfa::{FrontierNfa, Pool};
 use super::node_map::NodeMap;
@@ -320,25 +320,6 @@ impl<'a, 'g> RearivalRule<'a, 'g> {
         work: u64,
         bufs: &'a mut RuleBuffers,
     ) -> Self {
-        // The per-state epsilon closure: the runner's `epsilon_index`
-        // is from-indexed and expands on the fly; the search needs the
-        // to-set per arrival, closed once here over that same index.
-        let eps_from = epsilon_index(nfa);
-        let eps_closure = (0..nfa.states)
-            .map(|s| {
-                let mut reach = vec![s];
-                let mut pending = vec![s];
-                while let Some(t) = pending.pop() {
-                    for &to in &eps_from[t as usize] {
-                        if !reach.contains(&to) {
-                            reach.push(to);
-                            pending.push(to);
-                        }
-                    }
-                }
-                reach
-            })
-            .collect::<Vec<_>>();
         // The borrowed buffers' fresh run: one generation bump, every
         // previous run's verdicts stale together.
         bufs.begin_run();
@@ -348,7 +329,7 @@ impl<'a, 'g> RearivalRule<'a, 'g> {
                 view,
                 nfa,
                 arms,
-                eps_closure,
+                eps_closure: &nfa.eps_closure,
                 min_hops: nfa.min_hops,
                 depth_cap: nfa.max_hops.unwrap_or(REARRIVAL_DEPTH_CEILING),
                 memos: StateMemos::new(view, nfa.states as usize),

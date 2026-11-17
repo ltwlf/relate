@@ -181,9 +181,6 @@ pub(crate) fn capped_rows(
         nfa: &contract.nfa,
         target: &contract.target,
         pool,
-        mode: contract.pattern.mode,
-        min_hops: contract.nfa.min_hops,
-        max_hops: contract.nfa.max_hops,
         trailing: trailing_hops(contract.pattern),
         want,
         entering: entering.clone(),
@@ -251,9 +248,6 @@ struct Emission<'a> {
     nfa: &'a FrontierNfa,
     target: &'a NodeTarget<'a>,
     pool: Pool,
-    mode: Option<PathMode>,
-    min_hops: u32,
-    max_hops: Option<u32>,
     /// The top-level rel hops after the quantified spine — the reader
     /// the round count needs (`hops - leading - trailing` over the
     /// spine's fixed round length).
@@ -472,7 +466,7 @@ impl<'a> Emission<'a> {
     fn witness_mode(&self) -> WitnessMode {
         match self.pool {
             Pool::Walk => WitnessMode::Walk,
-            Pool::Default => match self.mode {
+            Pool::Default => match self.pattern.mode {
                 Some(PathMode::Acyclic) => WitnessMode::Acyclic,
                 Some(PathMode::Simple) => WitnessMode::Simple,
                 Some(PathMode::Trail) | None | Some(PathMode::Walk) => WitnessMode::Trail,
@@ -483,7 +477,7 @@ impl<'a> Emission<'a> {
     /// Whether the chain's hop count is inside the run's bounds.
     fn in_bounds(&self, chain: &Chain) -> bool {
         let hops = chain.rels.len() as u32;
-        hops >= self.min_hops && self.max_hops.is_none_or(|max| hops <= max)
+        hops >= self.nfa.min_hops && self.nfa.max_hops.is_none_or(|max| hops <= max)
     }
 
     /// The per-witness mode check — [`gpm_path_mode_allows`] itself,
