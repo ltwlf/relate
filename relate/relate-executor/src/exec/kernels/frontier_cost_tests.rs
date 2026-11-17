@@ -4,7 +4,7 @@ use relate_ir::{Direction, NodePattern, RelPattern};
 use relate_names::NamedToken;
 use relate_planner::{ContainsCount, DegreeMoments, PatternStats};
 
-use super::frontier_cost::{estimate, excess_degree, mean_degree, CostEstimate};
+use super::frontier_cost::{estimate, excess_degree, mean_degree, CostEstimate, Expansion};
 use crate::exec::test_support::{
     build, exec_cypher, frontier_decline_of, named_node, one_hop_rel, profiled, served,
 };
@@ -135,6 +135,24 @@ fn degree_moments_price_mean_and_excess() {
     );
 }
 
+impl<'a> Expansion<'a> {
+    /// One hop per listed rel, each priced on its own.
+    fn chain(rels: &[&'a RelPattern]) -> Self {
+        Expansion {
+            distinct: rels.to_vec(),
+            sequence: (0..rels.len()).collect(),
+        }
+    }
+
+    /// `count` hops over the one `rel`, as a quantifier expands.
+    fn repeat(rel: &'a RelPattern, count: usize) -> Self {
+        Expansion {
+            distinct: vec![rel],
+            sequence: vec![0; count],
+        }
+    }
+}
+
 /// Undirected hops count every rel twice: the trails of an undirected
 /// chain exceed the directed chain's by the doubling on each hop.
 #[test]
@@ -142,15 +160,32 @@ fn an_undirected_hop_counts_twice() {
     let stats = Uniform::new(100, 300, 1200);
     let directed = rel(Direction::Outgoing);
     let undirected = rel(Direction::Both);
-    let one = |rel: &RelPattern| estimate(&stats, 100, 100, 100, &start(), &[rel]).unwrap();
+    let one = |rel: &RelPattern| {
+        estimate(&stats, 100, 100, 100, &start(), &Expansion::chain(&[rel])).unwrap()
+    };
     // First hop: mean 3 per node (x2 undirected) from 100 seeds.
     assert_eq!(one(&directed).trails, 300.0);
     assert_eq!(one(&undirected).trails, 600.0);
     // Second hop rides the excess degree 1200/300 - 1 = 3 (x2).
-    let two_directed = estimate(&stats, 100, 100, 100, &start(), &[&directed, &directed]).unwrap();
+    let two_directed = estimate(
+        &stats,
+        100,
+        100,
+        100,
+        &start(),
+        &Expansion::chain(&[&directed, &directed]),
+    )
+    .unwrap();
     assert_eq!(two_directed.trails, 300.0 + 900.0);
-    let two_undirected =
-        estimate(&stats, 100, 100, 100, &start(), &[&undirected, &undirected]).unwrap();
+    let two_undirected = estimate(
+        &stats,
+        100,
+        100,
+        100,
+        &start(),
+        &Expansion::chain(&[&undirected, &undirected]),
+    )
+    .unwrap();
     assert_eq!(two_undirected.trails, 600.0 + 3600.0);
 }
 
@@ -162,9 +197,16 @@ fn an_undirected_hop_counts_twice() {
 fn the_first_hop_prices_the_side_it_leaves_by() {
     let sink = Uniform::directed(100, 0, 400);
     let one = |stats: &Uniform, direction| {
-        estimate(stats, 100, 100, 100, &start(), &[&rel(direction)])
-            .unwrap()
-            .trails
+        estimate(
+            stats,
+            100,
+            100,
+            100,
+            &start(),
+            &Expansion::chain(&[&rel(direction)]),
+        )
+        .unwrap()
+        .trails
     };
     assert_eq!(one(&sink, Direction::Outgoing), 0.0);
     assert_eq!(one(&sink, Direction::Incoming), 400.0);
@@ -187,7 +229,16 @@ fn a_missing_in_degree_side_leaves_only_outgoing_priceable() {
         in_sum: None,
         ..Uniform::new(10, 30, 120)
     };
-    let one = |direction| estimate(&stats, 10, 10, 10, &start(), &[&rel(direction)]);
+    let one = |direction| {
+        estimate(
+            &stats,
+            10,
+            10,
+            10,
+            &start(),
+            &Expansion::chain(&[&rel(direction)]),
+        )
+    };
     assert!(one(Direction::Outgoing).is_some());
     assert!(one(Direction::Incoming).is_none());
     assert!(one(Direction::Both).is_none());
@@ -199,7 +250,7 @@ fn a_missing_in_degree_side_leaves_only_outgoing_priceable() {
 fn pairs_and_probes_are_capped() {
     let stats = Uniform::new(10, 80, 800);
     let both = rel(Direction::Both);
-    let hops = [&both, &both, &both, &both];
+    let hops = Expansion::repeat(&both, 4);
     let cost = estimate(&stats, 10, 10, 10, &start(), &hops).unwrap();
     assert!(cost.trails > 10_000.0);
     assert_eq!(cost.pairs, 100.0);
@@ -212,7 +263,7 @@ fn pairs_and_probes_are_capped() {
 fn unpriceable_statistics_have_no_estimate() {
     let stats = Uniform::unpriceable(10);
     let both = rel(Direction::Both);
-    assert!(estimate(&stats, 10, 10, 10, &start(), &[&both]).is_none());
+    assert!(estimate(&stats, 10, 10, 10, &start(), &Expansion::chain(&[&both])).is_none());
 }
 
 /// `n` File nodes, each joined to the next `reach` nodes around a ring
@@ -323,7 +374,7 @@ fn every_routing_agrees_on_untyped_and_typed_reach() {
 fn the_estimate_consults_per_distinct_rel_not_per_hop() {
     let stats = Uniform::new(100, 300, 1200);
     let both = rel(Direction::Both);
-    let hops: Vec<&RelPattern> = vec![&both; 1000];
+    let hops = Expansion::repeat(&both, 1000);
     let cost = estimate(&stats, 100, 100, 100, &start(), &hops).unwrap();
     assert!(!cost.trails.is_nan());
     // First hop, one landing price for every later hop, the adjacency.

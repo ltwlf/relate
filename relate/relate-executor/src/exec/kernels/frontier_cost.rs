@@ -98,9 +98,10 @@ pub(super) fn estimate(
     seeds: u128,
     endpoints: u128,
     start: &NodePattern,
-    hops: &[&RelPattern],
+    hops: &Expansion<'_>,
 ) -> Option<CostEstimate> {
-    let (first, rest) = hops.split_first()?;
+    let (&first, rest) = hops.sequence.split_first()?;
+    let first = hops.distinct[first];
     let start_population = start
         .labels
         .iter()
@@ -115,14 +116,15 @@ pub(super) fn estimate(
     // degree-moments consult scans the histograms: price each distinct
     // rel once, so a crafted pattern costs consults in proportion to its
     // size, never to its expanded hop count.
-    let mut priced: Vec<(&RelPattern, f64)> = Vec::new();
-    for rel in rest {
-        let fanout = match priced.iter().find(|(seen, _)| std::ptr::eq(*seen, *rel)) {
-            Some(&(_, fanout)) => fanout,
+    let mut fanouts: Vec<Option<f64>> = vec![None; hops.distinct.len()];
+    for &index in rest {
+        let fanout = match fanouts[index] {
+            Some(fanout) => fanout,
             None => {
+                let rel = hops.distinct[index];
                 let landing = stats.degree_moments(&[], &rel.types)?;
                 let fanout = excess_degree(landing) * sides(rel);
-                priced.push((rel, fanout));
+                fanouts[index] = Some(fanout);
                 fanout
             }
         };
@@ -188,43 +190,60 @@ pub(super) fn excess_degree(moments: DegreeMoments) -> f64 {
     (moments.sum_sq as f64 / moments.sum as f64 - 1.0).max(0.0)
 }
 
+/// The hops of a pattern with every quantifier expanded to its maximum
+/// count: the DFS's path multiplicity. `distinct` holds each rel the
+/// pattern spells once; `sequence` lists, in hop order, an index into it
+/// per hop, so a repetition repeats an index, never a rel, and
+/// [`estimate`] prices per `distinct` entry without comparing rels.
+#[derive(Debug, Default)]
+pub(super) struct Expansion<'a> {
+    pub(super) distinct: Vec<&'a RelPattern>,
+    pub(super) sequence: Vec<usize>,
+}
+
 /// The rels of `elements` with every quantifier expanded to its maximum
 /// count — the trail estimate's input for the DFS's path multiplicity.
 /// `None` when the expansion cannot be priced — it passes
 /// [`MAX_ESTIMATE_HOPS`] (the multiplicity is saturated) or a quantifier
 /// is unbounded — and the caller engages rather than underestimates it.
-///
-/// Every repetition pushes the *same* `&RelPattern` the body holds, not a
-/// copy: [`estimate`] keys its per-rel price cache on that reference
-/// identity, so a change that clones a rel here must change the cache key.
-fn expand_max_hops(elements: &[PatternElement]) -> Option<Vec<&RelPattern>> {
-    let mut hops = Vec::new();
+fn expand_max_hops(elements: &[PatternElement]) -> Option<Expansion<'_>> {
+    let mut hops = Expansion::default();
+    expand_into(elements, &mut hops)?;
+    Some(hops)
+}
+
+fn expand_into<'a>(elements: &'a [PatternElement], hops: &mut Expansion<'a>) -> Option<()> {
     for element in elements {
-        if hops.len() > MAX_ESTIMATE_HOPS {
+        if hops.sequence.len() > MAX_ESTIMATE_HOPS {
             return None;
         }
         match element {
             // Only the rels matter to the estimate: nodes carry no
             // fanout of their own.
             PatternElement::Node(_) => {}
-            PatternElement::Relationship(rel) => hops.push(rel),
+            PatternElement::Relationship(rel) => {
+                hops.sequence.push(hops.distinct.len());
+                hops.distinct.push(rel);
+            }
             PatternElement::Quantified(qpp) => {
                 let max = qpp.max?;
                 // The body expands once; a body with no rel adds no
                 // hops, and every repetition of one that does grows the
                 // spine, so the ceiling bounds the loop.
-                let body = expand_max_hops(&qpp.elements)?;
+                let start = hops.sequence.len();
+                expand_into(&qpp.elements, hops)?;
+                let body = hops.sequence.split_off(start);
                 if body.is_empty() {
                     continue;
                 }
                 for _ in 0..max {
-                    hops.extend_from_slice(&body);
-                    if hops.len() > MAX_ESTIMATE_HOPS {
+                    hops.sequence.extend_from_slice(&body);
+                    if hops.sequence.len() > MAX_ESTIMATE_HOPS {
                         return None;
                     }
                 }
             }
         }
     }
-    Some(hops)
+    Some(())
 }

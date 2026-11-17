@@ -43,6 +43,7 @@ use relate_core::Error;
 
 use crate::ctx::ExecCtx;
 use crate::pattern_walk::{bind_node_stub, bind_rel_stub};
+use crate::row::Row;
 use crate::store::RelTypes;
 
 use super::super::chunk::{Chunk, Column};
@@ -100,15 +101,10 @@ pub(super) fn run(
     // inside the side-B stream (the halt stops the stream when it fills),
     // and existence decides inside the stream the same way.
     let mut side_a = Vec::new();
-    // The breaker's accumulating binding columns, one per named element —
+    // The breaker's accumulating bindings: one column per named element —
     // the hub is one of them by construction (the family is defined by a
     // shared variable), so a pushed binding fills every column.
-    let names = binding_names(star);
-    let mut columns: Vec<Vec<Value>> = vec![Vec::new(); names.len()];
-    // Complete bindings pushed — the row count's source. The count never
-    // rides a column's length: the zero-binding answer is the counter's
-    // zero, not an emptiness read off column 0.
-    let mut bindings = 0usize;
+    let mut bindings = Bindings::new(binding_names(star));
     let mut hit = false;
     // LABS-805: the whole hub loop's hop/walk counts tally locally and
     // flush on drop at the run's end — never a thread-local access per
@@ -125,7 +121,7 @@ pub(super) fn run(
         // The halt's per-hub guard, the chain kernel's per-row guard's
         // twin: a halt filled at an earlier hub ends the loop before this
         // hub expands either side.
-        if halt.is_some_and(|h| bindings >= h) {
+        if halt.is_some_and(|h| bindings.count >= h) {
             break;
         }
         side_a.clear();
@@ -152,11 +148,10 @@ pub(super) fn run(
                             // answers zero rows and the checked-ahead form
                             // keeps the count exact for every `want`; a
                             // filled halt also ends this hub's B stream.
-                            if halt.is_some_and(|h| bindings >= h) {
+                            if halt.is_some_and(|h| bindings.count >= h) {
                                 return Ok(false);
                             }
-                            push_binding(ctx, star, hub, a, &b, &names, &mut columns);
-                            bindings += 1;
+                            bindings.push(binding_values(ctx, star, hub, a, &b));
                         }
                         KernelMode::Exists { counted } => {
                             // Existence needs SOME complete binding to
@@ -185,14 +180,7 @@ pub(super) fn run(
     }
     match mode {
         KernelMode::Rows { .. } => {
-            let mut rows = Vec::new();
-            if bindings > 0 {
-                let encoded: Vec<Column> = columns
-                    .iter()
-                    .map(|column| Column::from_values(column))
-                    .collect();
-                rows = Chunk::from_columns(&names, encoded).to_rows();
-            }
+            let rows = bindings.into_rows();
             Ok(KernelOutput::Rows(rows))
         }
         KernelMode::Exists { .. } => Ok(KernelOutput::Exists(hit)),
@@ -363,18 +351,63 @@ fn binding_names(star: &HubStar<'_>) -> Vec<String> {
     names
 }
 
-/// Push one complete binding's values onto the breaker's columns.
-fn push_binding(
+/// The breaker's accumulating bindings: the column names, one column of
+/// values per name, and the count of complete bindings pushed — the row
+/// count's one owner. The count never rides a column's length: the
+/// zero-binding answer is the counter's zero, not an emptiness read off
+/// column 0.
+struct Bindings {
+    names: Vec<String>,
+    columns: Vec<Vec<Value>>,
+    count: usize,
+}
+
+impl Bindings {
+    fn new(names: Vec<String>) -> Self {
+        let columns = vec![Vec::new(); names.len()];
+        Bindings {
+            names,
+            columns,
+            count: 0,
+        }
+    }
+
+    /// Append one complete binding's values, one per column.
+    fn push(&mut self, values: Vec<Value>) {
+        debug_assert_eq!(
+            values.len(),
+            self.columns.len(),
+            "a binding fills every column"
+        );
+        for (slot, value) in self.columns.iter_mut().zip(values) {
+            slot.push(value);
+        }
+        self.count += 1;
+    }
+
+    fn into_rows(self) -> Vec<Row> {
+        if self.count == 0 {
+            return Vec::new();
+        }
+        let encoded: Vec<Column> = self
+            .columns
+            .iter()
+            .map(|column| Column::from_values(column))
+            .collect();
+        Chunk::from_columns(&self.names, encoded).to_rows()
+    }
+}
+
+/// One complete binding's values, in [`binding_names`] order.
+fn binding_values(
     ctx: ExecCtx<'_>,
     star: &HubStar<'_>,
     hub: NodeId,
     a: &SideRow,
     b: &SideRow,
-    names: &[String],
-    columns: &mut [Vec<Value>],
-) {
+) -> Vec<Value> {
     let graph = ctx.graph;
-    let mut values = Vec::with_capacity(names.len());
+    let mut values = Vec::new();
     if star.hub[0].pattern.variable.is_some() {
         values.push(bind_node_stub(graph, hub));
     }
@@ -388,9 +421,7 @@ fn push_binding(
             }
         }
     }
-    for (slot, value) in columns.iter_mut().zip(values) {
-        slot.push(value);
-    }
+    values
 }
 
 /// The existence check for one complete binding: the counted expression

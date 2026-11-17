@@ -595,6 +595,23 @@ impl<'a> Builder<'a> {
         }
     }
 
+    /// One nested quantifier (a var-length rel's normalization or a
+    /// nested group) unrolled from `current` toward `exit`: admissible
+    /// and bounded only — an unbounded nested loop's count would be
+    /// pinned by the global interval, which pins only totals.
+    fn nested_quantified(
+        &mut self,
+        quantified: &QuantifiedPathPattern,
+        current: u32,
+        exit: Option<u32>,
+    ) -> Option<(u32, Len)> {
+        if !quantified_admissible(quantified, false) {
+            return None;
+        }
+        let max = quantified.max?;
+        self.unroll(&quantified.elements, quantified.min, max, current, exit)
+    }
+
     /// The pattern's one top-level quantified element, entered at
     /// `entry` (the state of the node before it). Two sound forms:
     ///
@@ -801,6 +818,7 @@ impl<'a> Builder<'a> {
             // chain always ends with a node. It is the hop the close
             // target serves.
             let last_hop = i + 2 == elements.len();
+            let exit = if last_hop { last_target } else { None };
             match element {
                 PatternElement::Node(node) if i % 2 == 0 => {
                     // Under the forced rung the boundary positions' guards
@@ -816,7 +834,6 @@ impl<'a> Builder<'a> {
                     node_states.push((node.variable.clone(), current));
                 }
                 PatternElement::Relationship(rel) if i % 2 == 1 => {
-                    let exit = if last_hop { last_target } else { None };
                     if rel.var_length {
                         // The nested var-length rel: predicates on the
                         // traversed edges decline before the
@@ -825,15 +842,8 @@ impl<'a> Builder<'a> {
                             return None;
                         }
                         let quantified = var_length_quantified(rel);
-                        if !quantified_admissible(&quantified, false) {
-                            return None;
-                        }
-                        // A nested quantifier is bounded only — an
-                        // unbounded nested loop's count would be pinned
-                        // by the global interval, which pins only totals.
-                        let max = quantified.max?;
                         let (hop_exit, hop_len) =
-                            self.unroll(&quantified.elements, quantified.min, max, current, exit)?;
+                            self.nested_quantified(&quantified, current, exit)?;
                         current = hop_exit;
                         len = len.plus(hop_len)?;
                     } else {
@@ -861,16 +871,7 @@ impl<'a> Builder<'a> {
                     // shape exists; the same nested rules apply, its own
                     // WHERE included (only the spine's group predicate
                     // compiles).
-                    if !quantified_admissible(quantified, false) {
-                        return None;
-                    }
-                    // A nested quantifier is bounded only — an
-                    // unbounded nested loop's count would be pinned by
-                    // the global interval, which pins only totals.
-                    let max = quantified.max?;
-                    let exit = if last_hop { last_target } else { None };
-                    let (hop_exit, hop_len) =
-                        self.unroll(&quantified.elements, quantified.min, max, current, exit)?;
+                    let (hop_exit, hop_len) = self.nested_quantified(quantified, current, exit)?;
                     current = hop_exit;
                     len = len.plus(hop_len)?;
                 }
