@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use relate_core::{Error, Result, Value};
 use relate_ir::{Expr, MapProjectionItem};
-use relate_names::{SmallName, Token};
+use relate_names::SmallName;
 
 use crate::ctx::EvalCtx;
 // The pattern-expression arms (PatternPred, PatternComp, ShortestPath)
@@ -62,7 +62,7 @@ pub(crate) use relate_ir::{
 pub(crate) use expr::{
     binary, binary_pure, cmp_bool, eval_case_with, in_op, in_rhs, ordering_operator,
 };
-use expr::{eval_case, prop, reject_deleted_access, slice, subscript, unary};
+use expr::{eval_case, prop, prop_by_name, reject_deleted_access, slice, subscript, unary};
 /// Whether every variable `expr` reads is in `allowed`.
 pub(crate) fn expr_within(expr: &Expr, allowed: &HashSet<String>) -> bool {
     let mut used = HashSet::new();
@@ -232,7 +232,7 @@ pub fn eval(
             }
             reject_deleted_access(graph, &v)?;
             let key = dynamic_property_key(eval(graph, row, key, params)?)?;
-            prop(graph, &v, &(SmallName::from_name(&key), Token::Unresolved))
+            prop_by_name(graph, &v, SmallName::from_name(&key))
         }
         Expr::LabelPredicate {
             expr,
@@ -656,7 +656,7 @@ fn eval_map_projection(
                 map.insert(key.to_string(), eval(graph, row, value, params)?);
             }
             MapProjectionItem::Property { key } => {
-                let value = prop(graph, &target, &(key.clone(), Token::Unresolved))?;
+                let value = prop_by_name(graph, &target, key.clone())?;
                 map.insert(key.to_string(), value);
             }
             MapProjectionItem::Variable { name } => {

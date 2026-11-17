@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use relate_core::{integer_args, temporal, Error, ErrorKind, Result, Value};
 use relate_ir::{BinaryOp, Expr, UnaryOp};
-use relate_names::{NamedToken, SmallName, Token};
+use relate_names::{NamedToken, SmallName};
 
 use crate::overlay::ExecGraph;
 use crate::row::Row;
@@ -33,33 +33,36 @@ pub(crate) fn reject_deleted_access(graph: &ExecGraph<'_>, v: &Value) -> Result<
 /// `Token::Unresolved` for a key the plan never saw (a dynamic or
 /// projected key).
 pub(crate) fn prop(graph: &ExecGraph<'_>, v: &Value, key: &NamedToken) -> Result<Value> {
-    Ok(match v {
-        Value::Node(n) => graph
-            .node_prop_resolved(n.id, key)
-            .or_else(|| key.0.with_str(|text| n.properties.get(text).cloned()))
-            .unwrap_or(Value::Null),
-        Value::Relationship(r) => graph
-            .rel_prop_resolved(r.id, key)
-            .or_else(|| key.0.with_str(|text| r.properties.get(text).cloned()))
-            .unwrap_or(Value::Null),
-        Value::Map(m) => key
-            .0
-            .with_str(|text| m.get(text).cloned())
-            .unwrap_or(Value::Null),
-        Value::Temporal(t) => key.0.with_str(|text| t.component(text))?,
-        // The point accessor vocabulary is the data model's, beside the
-        // temporal one, so the executor only dispatches — and both answer
-        // the same typed rejection for a component their value lacks.
-        Value::Point(p) => key
-            .0
-            .with_str(|text| relate_core::point_component(p, text))?,
-        Value::Null => Value::Null,
-        _ => {
-            return Err(Error::invalid_argument_type(
-                "property access requires a map, node, relationship, temporal, or point value",
-            ))
-        }
+    key.0.with_str(|text| {
+        Ok(match v {
+            Value::Node(n) => graph
+                .node_prop_resolved(n.id, key)
+                .or_else(|| n.properties.get(text).cloned())
+                .unwrap_or(Value::Null),
+            Value::Relationship(r) => graph
+                .rel_prop_resolved(r.id, key)
+                .or_else(|| r.properties.get(text).cloned())
+                .unwrap_or(Value::Null),
+            Value::Map(m) => m.get(text).cloned().unwrap_or(Value::Null),
+            Value::Temporal(t) => t.component(text)?,
+            // The point accessor vocabulary is the data model's, beside the
+            // temporal one, so the executor only dispatches — and both answer
+            // the same typed rejection for a component their value lacks.
+            Value::Point(p) => relate_core::point_component(p, text)?,
+            Value::Null => Value::Null,
+            _ => {
+                return Err(Error::invalid_argument_type(
+                    "property access requires a map, node, relationship, temporal, or point value",
+                ))
+            }
+        })
     })
+}
+
+/// [`prop`] for a key known only at runtime (a dynamic subscript or a
+/// projected key): the name rides as `Token::Unresolved`, read by text.
+pub(crate) fn prop_by_name(graph: &ExecGraph<'_>, v: &Value, name: SmallName) -> Result<Value> {
+    prop(graph, v, &relate_names::unresolved(name))
 }
 
 pub(crate) fn unary(op: UnaryOp, v: Value) -> Result<Value> {
@@ -301,7 +304,7 @@ pub(crate) fn subscript(graph: &ExecGraph<'_>, v: &Value, index: Value) -> Resul
         // A string key rides the same dispatch as `n.k` (property access),
         // so the two paths cannot drift (the Map/Node/Relationship arms used
         // to be a hand-copied, subtly divergent subset of prop).
-        (_, Value::String(k)) => prop(graph, v, &(SmallName::from_name(&k), Token::Unresolved))?,
+        (_, Value::String(k)) => prop_by_name(graph, v, SmallName::from_name(&k))?,
         (Value::Vector { .. }, _) => {
             return Err(Error::invalid_argument_type(
                 "vector indexing is not supported",
