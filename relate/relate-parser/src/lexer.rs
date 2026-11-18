@@ -6,6 +6,10 @@ use crate::unicode_identifier;
 mod ascii;
 mod number;
 mod string;
+// The interpolation pattern's escape resolution shares the lexer's one
+// `\uXXXX` window reader (ADR-0619's consolidation), so that one name —
+// not the whole `string` module — crosses the sibling module boundary.
+pub(crate) use string::{unicode_escape_window, unicode_surrogate_pair, UNICODE_ESCAPE_SPAN};
 
 /// Parse-affecting preview options: the ADR-0371 preview gates that widen
 /// what the parser accepts (the lexer's token stream and the parser's own
@@ -102,6 +106,20 @@ struct Lexer<'a> {
     col: usize,
     tokens: Vec<Token<'a>>,
     options: ParseOptions,
+}
+
+/// One classified run of whitespace between tokens, in the shape the
+/// ASCII batch's `ascii::ws_run_summary` reports: the byte span, the
+/// newline count, and the bytes after the last newline (zero when there
+/// is none). A decoded non-ASCII character and a `\uXXXX` escape whose
+/// character is whitespace (ADR-0619) are one-character runs of the same
+/// shape — only a decoded `\n` counts as a newline (the ASCII batch
+/// consumes a literal one before the decoded path is reached) — so every
+/// spelling takes the same consume step, [`Lexer::advance_ws_span`].
+struct WhitespaceRun {
+    bytes: usize,
+    newlines: usize,
+    after_last_newline: usize,
 }
 
 impl<'a> Lexer<'a> {
@@ -323,10 +341,14 @@ impl<'a> Lexer<'a> {
                     self.read_number(line, col);
                 }
                 // The remaining bytes open either an identifier or one
-                // invalid character; the decoded-character decision lives in
-                // `at_ident_start`, so `read_identifier` has exactly this one
-                // call site (ADR-0182).
-                _ if self.at_ident_start() => {
+                // invalid character; the decoded-character decision lives
+                // in `at_ident_start`, widened for the source-escape
+                // spelling (ADR-0619) by `at_widened_ident_start`, so
+                // `read_identifier` has exactly this one call site
+                // (ADR-0182). Parameters keep the plain predicate — that
+                // split is how the escape's rejection boundary
+                // (ADR-0619) is encoded in code.
+                _ if self.at_widened_ident_start() => {
                     self.read_identifier(line, col);
                 }
                 _ => {
@@ -453,36 +475,96 @@ impl<'a> Lexer<'a> {
             // CIP-88: the GQL/Java Unicode whitespace set (Zs + Zl + Zp
             // categories plus separators, i.e. Rust's char::is_whitespace)
             // is also accepted between tokens — e.g. NBSP U+00A0. Verified
-            // against Neo4j 2026.09.0. The byte at the cursor is not ASCII
-            // whitespace, so only a non-ASCII character can still qualify;
-            // the decoded path decides.
-            if let Some((c, len)) = self.peek_char() {
-                if c.is_whitespace() {
-                    self.advance_by(len);
-                    continue;
-                }
+            // against Neo4j 2026.09.0. A source-level `\uXXXX` escape
+            // whose character is whitespace (ADR-0619) — the reference
+            // server's own spelling for the separators its documentation
+            // cannot write as characters — is that whitespace too. The
+            // byte at the cursor is not ASCII whitespace, so only a
+            // non-ASCII character or an escape can still qualify; the
+            // one classification point decides both spellings, and the
+            // one consume step settles either.
+            if let Some(run) = self.peek_whitespace() {
+                self.advance_ws_span(run);
+                continue;
             }
             break;
         }
     }
 
-    /// Consume the `n`-byte ASCII whitespace run `[0, n)` of word `w`'s
-    /// lanes, settling line and column in one step — exactly `n` calls to
-    /// [`Lexer::advance`] would leave: the line advances by the run's
-    /// newline count, and the column restarts after the last one. The
-    /// `ascii` module hands back that settled run summary; the per-lane
-    /// bit layout never crosses the module boundary.
-    fn advance_ws_run(&mut self, w: u64, n: usize) {
-        let (newlines, after_last_newline) = ascii::ws_run_summary(w, n);
-        self.line += newlines;
-        if newlines == 0 {
-            self.col += n;
+    /// The whitespace run at the cursor — a decoded non-ASCII character,
+    /// or a `\uXXXX` escape whose character is whitespace (ADR-0619) —
+    /// or `None` when the cursor opens no whitespace. The one
+    /// classification point for the character-at-a-time spellings: one
+    /// selection (the escape first, the raw character otherwise), one
+    /// decision. The ASCII run is classified in bulk by the `ascii` word
+    /// path before this is consulted, and reaches the same consume step.
+    ///
+    /// An escape's run spans its six source bytes and counts no newline,
+    /// whatever character it decoded to: `line` and `col` stay *source*
+    /// positions, so the byte offset `token_start_byte` derives from them
+    /// still indexes the source (ADR-0503).
+    fn peek_whitespace(&self) -> Option<WhitespaceRun> {
+        if let Some(c) = self.peek_source_escape() {
+            return c.is_whitespace().then_some(WhitespaceRun {
+                bytes: string::UNICODE_ESCAPE_SPAN,
+                newlines: 0,
+                after_last_newline: 0,
+            });
+        }
+        let (c, bytes) = self.peek_char()?;
+        c.is_whitespace().then_some(WhitespaceRun {
+            bytes,
+            newlines: usize::from(c == '\n'),
+            after_last_newline: 0,
+        })
+    }
+
+    /// A well-formed source-level `\uXXXX` escape at the cursor
+    /// (ADR-0619): backslash, `u`, four hex digits, a scalar value —
+    /// a surrogate or out-of-range value is not an escape and keeps
+    /// the historical `unexpected character: \` rejection. Returns the
+    /// decoded character without consuming anything; the spelling's
+    /// byte span is [`string::UNICODE_ESCAPE_SPAN`]. The window decode
+    /// is the one the string-literal escapes share
+    /// (`string::unicode_escape_value`); consulted only where the
+    /// escape widens acceptance (whitespace, identifier text) — every
+    /// other position rejects it, the boundary ADR-0619 records.
+    fn peek_source_escape(&self) -> Option<char> {
+        string::unicode_escape_value(self.input.get(self.pos..)?).and_then(char::from_u32)
+    }
+
+    /// Settle the cursor past one whitespace run: the line advances by
+    /// the run's newline count, the column by its byte span — the
+    /// position one [`Lexer::advance`] per source byte would leave, moved
+    /// in one step. A decoded `\uXXXX` escape is whitespace by its
+    /// character but still six source bytes on the line it is spelled on,
+    /// so it advances the column by six and never the line. The one
+    /// consume step for every spelling whitespace can take between
+    /// tokens; the ASCII batch and the decoded/escape path both end here.
+    fn advance_ws_span(&mut self, run: WhitespaceRun) {
+        self.line += run.newlines;
+        if run.newlines == 0 {
+            self.col += run.bytes;
         } else {
             // The column after the last newline is the run's bytes past
             // it, +1.
-            self.col = after_last_newline + 1;
+            self.col = run.after_last_newline + 1;
         }
-        self.pos += n;
+        self.pos += run.bytes;
+    }
+
+    /// Consume the `n`-byte ASCII whitespace run `[0, n)` of word `w`'s
+    /// lanes through the one whitespace consume step,
+    /// [`Lexer::advance_ws_span`]. The `ascii` module hands back the
+    /// settled run summary; the per-lane bit layout never crosses the
+    /// module boundary.
+    fn advance_ws_run(&mut self, w: u64, n: usize) {
+        let (newlines, after_last_newline) = ascii::ws_run_summary(w, n);
+        self.advance_ws_span(WhitespaceRun {
+            bytes: n,
+            newlines,
+            after_last_newline,
+        });
     }
 
     /// The length of the run of consecutive `*` starting at the cursor.
@@ -506,6 +588,20 @@ impl<'a> Lexer<'a> {
         }
         self.peek_char()
             .is_some_and(|(c, _)| unicode_identifier::is_identifier_start(c))
+    }
+
+    /// True when the cursor opens an identifier: a plain identifier-start
+    /// character ([`Lexer::at_ident_start`]), or a `\uXXXX` escape whose
+    /// character is one (ADR-0619) — the escape is a spelling of the
+    /// character, not a distinct token class. Deliberately a second
+    /// predicate rather than a widening of `at_ident_start`:
+    /// `read_parameter` keeps the plain form, so an escape cannot spell
+    /// a parameter name — ADR-0619's boundary, encoded at the call site.
+    fn at_widened_ident_start(&self) -> bool {
+        self.at_ident_start()
+            || self
+                .peek_source_escape()
+                .is_some_and(unicode_identifier::is_identifier_start)
     }
 
     /// Consume the remaining identifier-part run from `start` and return it
@@ -596,9 +692,36 @@ impl<'a> Lexer<'a> {
         );
     }
 
+    /// The identifier text from the cursor: the escape-free run,
+    /// borrowed whole (ADR-0505) — or, when the run carries a
+    /// source-level `\uXXXX` escape (ADR-0619), owned text synthesized
+    /// from the borrowed prefix, each decoded character, and the
+    /// escape-free run that follows it. `take_ident_run` stops at the
+    /// backslash, so the diversion begins with the borrowed prefix
+    /// already in hand. An escape continues the identifier exactly when
+    /// its character is an identifier part — the predicate
+    /// [`Lexer::take_ident_part`] applies to a decoded character,
+    /// stated once, at the loop head.
+    fn take_ident_text(&mut self) -> Cow<'a, str> {
+        let borrowed = self.take_ident_run(self.pos);
+        let mut owned: Option<String> = None;
+        while let Some(c) = self.peek_source_escape() {
+            if !unicode_identifier::is_identifier_part(c) {
+                break;
+            }
+            let text = owned.get_or_insert_with(|| borrowed.to_string());
+            text.push(c);
+            self.advance_by(string::UNICODE_ESCAPE_SPAN);
+            text.push_str(self.take_ident_run(self.pos));
+        }
+        match owned {
+            Some(text) => Cow::Owned(text),
+            None => Cow::Borrowed(borrowed),
+        }
+    }
+
     fn read_identifier(&mut self, line: usize, col: usize) {
-        let start = self.pos;
-        let literal = self.take_ident_run(start);
+        let literal = self.take_ident_text();
         // CIP-261: a lone `s`/`S` immediately followed by a quote starts an
         // interpolated string literal (`s'...'` / `s"..."`). Anything else
         // stays a normal identifier/keyword.
@@ -609,7 +732,7 @@ impl<'a> Lexer<'a> {
             self.read_interpolation(line, col);
             return;
         }
-        let tok_type = lookup_keyword(literal);
+        let tok_type = lookup_keyword(&literal);
         self.emit(tok_type, literal, line, col);
     }
 

@@ -110,65 +110,63 @@ pub(super) fn parse_interp_body(
 /// unknown escape keeps its two-character form.
 fn push_interp_escape(text: &mut String, chars: &[char], i: usize) -> Result<usize, String> {
     let next = chars[i + 1]; // caller guarantees `i + 1 < chars.len()`
-    match next {
-        '\\' => {
-            text.push('\\');
-            Ok(2)
-        }
-        '{' => {
-            text.push('{');
-            Ok(2)
-        }
-        '}' => {
-            text.push('}');
-            Ok(2)
-        }
-        'n' => {
-            text.push('\n');
-            Ok(2)
-        }
-        't' => {
-            text.push('\t');
-            Ok(2)
-        }
-        '\'' => {
-            text.push('\'');
-            Ok(2)
-        }
-        '"' => {
-            text.push('"');
-            Ok(2)
-        }
-        'u' => {
-            if i + 6 > chars.len() {
-                return Err("invalid unicode escape sequence".into());
-            }
-            let hex: String = chars[i + 2..i + 6].iter().collect();
-            let invalid = || Err(format!("invalid unicode escape sequence: \\u{hex}"));
-            let Ok(cp) = u32::from_str_radix(&hex, 16) else {
-                return invalid();
-            };
-            // A UTF-16 surrogate pair escape (`\uD800\uDC00`) is one
-            // supplementary code point, same as in a plain string
-            // literal (see the lexer's `surrogate_pair_codepoint`).
-            if let Some(pair) = interp_surrogate_pair(cp, chars, i) {
-                text.push(pair.0);
-                return Ok(pair.1);
-            }
-            match char::from_u32(cp) {
-                Some(ch) => {
-                    text.push(ch);
-                    Ok(6)
-                }
-                // A lone surrogate is not a scalar value.
-                None => invalid(),
-            }
-        }
+    let decoded = match next {
+        'u' => return push_interp_unicode_escape(text, chars, i),
+        // The one-character escapes: the escape grammar's flat half —
+        // one push, one `Ok(2)` for all of them.
+        '\\' => '\\',
+        '{' => '{',
+        '}' => '}',
+        'n' => '\n',
+        't' => '\t',
+        '\'' => '\'',
+        '"' => '"',
         other => {
             text.push('\\');
             text.push(other);
-            Ok(2)
+            return Ok(2);
         }
+    };
+    text.push(decoded);
+    Ok(2)
+}
+
+/// Resolve the \`uXXXX` escape at `chars[i..]` — the whole `'u'` arm of
+/// [`push_interp_escape`], at arm length so that one stays a flat match
+/// over the escape letter. The window reads through the one `&[char]`
+/// reader the lexer's escapes share (`unicode_escape_window`); a UTF-16
+/// surrogate pair escape is the single supplementary code point the pair
+/// names, same as in a plain string literal.
+fn push_interp_unicode_escape(
+    text: &mut String,
+    chars: &[char],
+    i: usize,
+) -> Result<usize, String> {
+    if i + crate::lexer::UNICODE_ESCAPE_SPAN > chars.len() {
+        return Err("invalid unicode escape sequence".into());
+    }
+    let invalid = || {
+        Err(format!(
+            "invalid unicode escape sequence: \\u{}",
+            chars[i + 2..i + crate::lexer::UNICODE_ESCAPE_SPAN]
+                .iter()
+                .collect::<String>()
+        ))
+    };
+    let Some((cp, span)) = crate::lexer::unicode_escape_window(&chars[i..]) else {
+        return invalid();
+    };
+    if let Some(pair) = interp_surrogate_pair(cp, chars, i) {
+        text.push(pair.0);
+        return Ok(pair.1);
+    }
+    match char::from_u32(cp) {
+        Some(ch) => {
+            text.push(ch);
+            Ok(span)
+        }
+        // A lone surrogate is not a scalar value.
+        None => invalid(),
     }
 }
 
@@ -176,16 +174,7 @@ fn push_interp_escape(text: &mut String, chars: &[char], i: usize) -> Result<usi
 /// immediately following low-surrogate escape, returning the combined
 /// supplementary code point and the 12 chars the pair occupies.
 fn interp_surrogate_pair(cp: u32, chars: &[char], i: usize) -> Option<(char, usize)> {
-    if !(0xD800..=0xDBFF).contains(&cp) || i + 12 > chars.len() {
-        return None;
-    }
-    if chars[i + 6] != '\\' || chars[i + 7] != 'u' {
-        return None;
-    }
-    let hex: String = chars[i + 8..i + 12].iter().collect();
-    let lo = u32::from_str_radix(&hex, 16).ok()?;
-    if !(0xDC00..=0xDFFF).contains(&lo) {
-        return None;
-    }
-    char::from_u32(0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00)).map(|ch| (ch, 12))
+    let (lo, span) =
+        crate::lexer::unicode_escape_window(chars.get(i + crate::lexer::UNICODE_ESCAPE_SPAN..)?)?;
+    crate::lexer::unicode_surrogate_pair(cp, lo).map(|ch| (ch, 2 * span))
 }

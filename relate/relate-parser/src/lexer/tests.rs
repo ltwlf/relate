@@ -12,8 +12,9 @@ fn tok_literals(input: &str) -> Vec<String> {
         .collect()
 }
 
-// The parameter-name tests live in their own topic module; every
-// other topic stays in this file until it earns its own.
+// The parameter-name and escape families each live in their own topic
+// module; every other topic stays in this file until it earns its own.
+mod escapes;
 mod parameters;
 #[test]
 fn test_decode_char_bounds_validation_to_its_sequence() {
@@ -280,34 +281,6 @@ fn test_string_escapes() {
 }
 
 #[test]
-fn test_unicode_escape() {
-    let tokens = tokenize(r"'\u0041'");
-    assert_eq!(tokens[0].literal, "A");
-}
-
-#[test]
-fn test_interpolation_escapes_match_string_escapes() {
-    // Round-3 CIP-261 design: the InterpString token carries escapes RAW
-    // (both text and embed regions) — `parse_interp_body` resolves text
-    // escapes with an unambiguous two-byte lookahead. The lexer-level
-    // assertion is therefore the raw body; resolution is covered by the
-    // parser tests (`test_interp_embed_escaped_quote_kept_raw` etc.).
-    let tokens = tokenize(r"s'a\nb\tc'");
-    assert_eq!(tokens[0].ty, TokenType::InterpString);
-    assert_eq!(tokens[0].literal, r"a\nb\tc");
-
-    let tokens = tokenize(r"s'\u0041{1}'");
-    assert_eq!(tokens[0].literal, r"\u0041{1}");
-
-    let tokens = tokenize(r"s'\{x\}'");
-    assert_eq!(tokens[0].literal, r"\{x\}");
-
-    // An unknown escape is preserved verbatim, like a plain string.
-    let tokens = tokenize(r"s'\q'");
-    assert_eq!(tokens[0].literal, "\\q");
-}
-
-#[test]
 fn test_backtick_identifier() {
     let tokens = tokenize("`my label`");
     assert_eq!(tokens.len(), 1);
@@ -460,77 +433,6 @@ fn test_backtick_identifier_non_ascii_roundtrip() {
     assert_eq!(tokens[0].ty, TokenType::Identifier);
     assert_eq!(tokens[0].literal, "Größe");
     assert_eq!(tokens[0].literal.as_bytes(), "Größe".as_bytes());
-}
-
-#[test]
-fn test_unicode_escape_invalid_codepoint_is_error() {
-    // Surrogate codepoints are not valid `char`s; they must produce a lex
-    // error rather than being silently dropped from the string.
-    for input in [r"'\uD800'", r"'\uDFFF'"] {
-        let tokens = tokenize(input);
-        assert_eq!(tokens[0].ty, TokenType::Error, "{input}");
-        assert!(
-            tokens[0].literal.contains("invalid unicode escape"),
-            "{input}: {}",
-            tokens[0].literal
-        );
-    }
-}
-
-#[test]
-fn test_unicode_escape_window_cut_mid_character_is_error() {
-    // The `\u` operand window is a raw four-byte cut and can end
-    // mid-character (`'\u00€'` yields `30 30 E2 82`): it must be one
-    // `InvalidUnicodeLiteral` error naming the bytes found — never a
-    // fabricated empty operand silently substituted for them.
-    let tokens = tokenize("'\u{5c}u00€'");
-    assert_eq!(tokens[0].ty, TokenType::Error);
-    assert!(
-        tokens[0].literal.contains("invalid unicode escape"),
-        "{}",
-        tokens[0].literal
-    );
-    assert_eq!(tokens[0].detail, Some("InvalidUnicodeLiteral"));
-    // A valid-UTF-8 window of non-hex digits reports the window itself,
-    // exactly as the radix rejection always did.
-    let tokens = tokenize(r"'\uGGGG'");
-    assert_eq!(tokens[0].ty, TokenType::Error);
-    assert_eq!(
-        tokens[0].literal,
-        r"invalid unicode escape sequence: \uGGGG"
-    );
-    assert_eq!(tokens[0].detail, Some("InvalidUnicodeLiteral"));
-}
-
-#[test]
-fn test_unicode_escape_surrogate_pair_is_one_codepoint() {
-    // A UTF-16 surrogate pair escape names one supplementary code point
-    // (U+10000, the TCK's `'𐀀'`); the lone-surrogate rejection above still
-    // covers a high surrogate with no low pair.
-    let tokens = tokenize("'\\uD800\\uDC00'");
-    assert_eq!(tokens.len(), 1);
-    assert_eq!(tokens[0].ty, TokenType::String);
-    assert_eq!(tokens[0].literal, "\u{10000}");
-    // A high surrogate followed by anything but a low surrogate stays an
-    // error (the second escape alone is not a pair).
-    for input in [r"'\uD800\uD800'", r"'\uD800x'", r"'\uDC00\uD800'"] {
-        let tokens = tokenize(input);
-        assert_eq!(tokens[0].ty, TokenType::Error, "{input}");
-    }
-}
-
-#[test]
-fn test_escape_fallback_preserves_non_ascii() {
-    // An unknown escape keeps the backslash and the escaped character;
-    // a non-ASCII escaped character must survive byte-identically.
-    let tokens = tokenize("'\\é'");
-    assert_eq!(tokens.len(), 1);
-    assert_eq!(tokens[0].ty, TokenType::String);
-    assert_eq!(tokens[0].literal, "\\é");
-
-    // Mixed with a recognized escape.
-    let tokens = tokenize("'é\\n'");
-    assert_eq!(tokens[0].literal, "é\n");
 }
 
 #[test]

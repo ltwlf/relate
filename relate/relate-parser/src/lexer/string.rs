@@ -10,26 +10,72 @@ use crate::token::TokenType;
 
 use super::Lexer;
 
+/// The byte span every `\uXXXX` escape takes: backslash, `u`, four hex
+/// digits.
+pub(crate) const UNICODE_ESCAPE_SPAN: usize = 6;
+
+/// The code point four hex characters name — the digit read both window
+/// readers share.
+fn unicode_escape_hex4(window: [char; 4]) -> Option<u32> {
+    let mut value = 0u32;
+    for c in window {
+        value = (value << 4) | c.to_digit(16)?;
+    }
+    Some(value)
+}
+
+/// The code point the `\uXXXX` window at the start of `chars` names —
+/// backslash, `u`, four ASCII hex digits — with the char span that
+/// window occupies, or `None` when the window is not well-formed. The
+/// `&[char]` twin of the byte window [`unicode_escape_value`] reads, so
+/// the interpolation pattern's escapes see the same one window — prefix,
+/// length, and span included — the lexer's do.
+pub(crate) fn unicode_escape_window(chars: &[char]) -> Option<(u32, usize)> {
+    if chars.len() < UNICODE_ESCAPE_SPAN || chars[0] != '\\' || chars[1] != 'u' {
+        return None;
+    }
+    let window: [char; 4] = chars[2..UNICODE_ESCAPE_SPAN].try_into().ok()?;
+    unicode_escape_hex4(window).map(|value| (value, UNICODE_ESCAPE_SPAN))
+}
+
+/// The supplementary code point a UTF-16 surrogate pair names — both
+/// range classifications and the combine formula in the one place the
+/// string-literal and interpolation paths share. `None` when either half
+/// is not the surrogate it must be.
+pub(crate) fn unicode_surrogate_pair(hi: u32, lo: u32) -> Option<char> {
+    if !(0xD800..=0xDBFF).contains(&hi) || !(0xDC00..=0xDFFF).contains(&lo) {
+        return None;
+    }
+    // The pair always names a scalar (0x10000..=0x10FFFF); the map only
+    // types the return as the `char` the callers push.
+    char::from_u32(0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00))
+}
+
+/// The code point named by the `\uXXXX` window starting at `bytes`'
+/// cursor — backslash, `u`, four ASCII hex digits — or `None` when the
+/// window is not well-formed. The one window decoder for every form the
+/// escape takes in this crate: string literals (which combine surrogate
+/// pairs and report malformed windows), source-level escapes (ADR-0619,
+/// which reject a lone surrogate), and the interpolation pattern's
+/// `&[char]` segments (through [`unicode_escape_window`]). Classification
+/// stays the caller's; this only reads the window.
+pub(crate) fn unicode_escape_value(bytes: &[u8]) -> Option<u32> {
+    if bytes.len() < UNICODE_ESCAPE_SPAN || bytes[0] != b'\\' || bytes[1] != b'u' {
+        return None;
+    }
+    let window: [u8; 4] = bytes[2..UNICODE_ESCAPE_SPAN].try_into().ok()?;
+    unicode_escape_hex4(window.map(|byte| byte as char))
+}
+
 impl<'a> Lexer<'a> {
     /// If `hi` is a high surrogate and the four hex digits at the cursor are
     /// immediately followed by `\uXXXX` naming a low surrogate, return the
     /// combined supplementary code point and the byte count of that second
-    /// escape (6). `None` leaves the lone surrogate to the invalid-literal
+    /// escape. `None` leaves the lone surrogate to the invalid-literal
     /// path. Ported to the UTF-16 escape form Neo4j's Java strings use.
-    fn surrogate_pair_codepoint(&self, hi: u32) -> Option<(u32, usize)> {
-        if !(0xD800..=0xDBFF).contains(&hi) {
-            return None;
-        }
-        let rest = self.input.get(self.pos + 4..)?;
-        if rest.len() < 6 || rest[0] != b'\\' || rest[1] != b'u' {
-            return None;
-        }
-        let hex = std::str::from_utf8(rest.get(2..6)?).ok()?;
-        let lo = u32::from_str_radix(hex, 16).ok()?;
-        if !(0xDC00..=0xDFFF).contains(&lo) {
-            return None;
-        }
-        Some((0x10000 + ((hi - 0xD800) << 10) + (lo - 0xDC00), 6))
+    fn surrogate_pair_codepoint(&self, hi: u32) -> Option<(char, usize)> {
+        let lo = unicode_escape_value(self.input.get(self.pos + 4..)?)?;
+        unicode_surrogate_pair(hi, lo).map(|ch| (ch, UNICODE_ESCAPE_SPAN))
     }
 
     /// Read a quoted string literal. The token literal is the *decoded*
@@ -89,79 +135,7 @@ impl<'a> Lexer<'a> {
             b'\\' => s.push('\\'),
             b'\'' => s.push('\''),
             b'"' => s.push('"'),
-            b'u' => {
-                if self.pos + 4 > self.input.len() {
-                    self.emit_error_detail(
-                        "invalid unicode escape sequence",
-                        line,
-                        col,
-                        "InvalidUnicodeLiteral",
-                    );
-                    return Err(());
-                }
-                let hex = &self.input[self.pos..self.pos + 4];
-                // Decide the shape before decoding: the four-byte window is
-                // cut from the byte view and can end mid-character
-                // (`'\u00€'` yields `30 30 E2 82`), so `from_utf8` can
-                // legitimately fail here. The window must be four ASCII
-                // hex digits; anything else is one malformed `\u` escape,
-                // reported from its byte-escaped text — never a fabricated
-                // empty operand.
-                let (hex_str, cp) = match std::str::from_utf8(hex)
-                    .ok()
-                    .filter(|s| s.bytes().all(|b| b.is_ascii_hexdigit()))
-                    .map(|s| (s, u32::from_str_radix(s, 16)))
-                {
-                    Some((s, Ok(cp))) => (s, cp),
-                    _ => {
-                        self.emit_error_detail(
-                            format!(
-                                "invalid unicode escape sequence: \\u{}",
-                                unicode_window_text(hex)
-                            ),
-                            line,
-                            col,
-                            "InvalidUnicodeLiteral",
-                        );
-                        return Err(());
-                    }
-                };
-                // A high surrogate immediately followed by a low
-                // surrogate escape is one supplementary code point
-                // encoded as a UTF-16 pair (`'𐀀'` is
-                // U+10000) — Neo4j accepts the pair, and the TCK's
-                // StringOrdering scenarios pin its code-point order.
-                if let Some((combined, extra)) = self.surrogate_pair_codepoint(cp) {
-                    if let Some(ch) = char::from_u32(combined) {
-                        s.push(ch);
-                        for _ in 0..4 + extra {
-                            self.advance();
-                        }
-                        return Ok(());
-                    }
-                }
-                // A lone surrogate (U+D800..=U+DFFF) and codepoints
-                // above U+10FFFF are not valid `char`s; dropping them
-                // would silently corrupt the string (main's #72
-                // hardening).
-                match char::from_u32(cp) {
-                    Some(ch) => {
-                        s.push(ch);
-                        for _ in 0..4 {
-                            self.advance();
-                        }
-                    }
-                    None => {
-                        self.emit_error_detail(
-                            format!("invalid unicode escape sequence: \\u{hex_str}"),
-                            line,
-                            col,
-                            "InvalidUnicodeLiteral",
-                        );
-                        return Err(());
-                    }
-                }
-            }
+            b'u' => return self.push_unicode_escape(s, line, col),
             other => {
                 s.push('\\');
                 // An escaped non-ASCII byte must survive byte-identically,
@@ -171,6 +145,70 @@ impl<'a> Lexer<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Resolve the `\uXXXX` escape of a plain string body — the whole
+    /// `b'u'` arm of [`Lexer::push_escape`], at arm length so that one
+    /// stays a flat dispatch over the escape letter. The four-byte window
+    /// is cut from the byte view and can end mid-character (`'\u00€'`
+    /// yields `30 30 E2 82`), and its text must render byte-escaped for
+    /// the report — [`unicode_window_text`] — never a fabricated empty
+    /// operand. A malformed window and a non-scalar value are the one
+    /// `InvalidUnicodeLiteral` rejection; a high surrogate immediately
+    /// followed by a low one is the single supplementary code point the
+    /// pair names (the UTF-16 escape form the reference server's strings
+    /// use). `self.pos` sits on the first hex digit: the window decoder
+    /// reads the escape from its backslash, two bytes back.
+    fn push_unicode_escape(&mut self, s: &mut String, line: usize, col: usize) -> Result<(), ()> {
+        if self.pos + 4 > self.input.len() {
+            self.emit_error_detail(
+                "invalid unicode escape sequence",
+                line,
+                col,
+                "InvalidUnicodeLiteral",
+            );
+            return Err(());
+        }
+        let hex = &self.input[self.pos..self.pos + 4];
+        let reject = |lexer: &mut Self| {
+            lexer.emit_error_detail(
+                format!(
+                    "invalid unicode escape sequence: \\u{}",
+                    unicode_window_text(hex)
+                ),
+                line,
+                col,
+                "InvalidUnicodeLiteral",
+            );
+        };
+        let cp = match unicode_escape_value(&self.input[self.pos - 2..]) {
+            Some(cp) => cp,
+            None => {
+                reject(self);
+                return Err(());
+            }
+        };
+        // The surrogate pair (if any) is decided first: its second escape
+        // is consumed with the first, in one advance.
+        if let Some((ch, pair_span)) = self.surrogate_pair_codepoint(cp) {
+            s.push(ch);
+            self.advance_by(4 + pair_span);
+            return Ok(());
+        }
+        // A lone surrogate (U+D800..=U+DFFF) and codepoints above
+        // U+10FFFF are not valid `char`s; dropping them would silently
+        // corrupt the string (main's #72 hardening).
+        match char::from_u32(cp) {
+            Some(ch) => {
+                s.push(ch);
+                self.advance_by(4);
+                Ok(())
+            }
+            None => {
+                reject(self);
+                Err(())
+            }
+        }
     }
 
     /// Read a backtick-quoted name and return its decoded literal — the
