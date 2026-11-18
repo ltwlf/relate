@@ -8,7 +8,7 @@
 //! exclusive one. A fold appends the new encoding and marks the replaced
 //! range dead; compaction re-lays the live streams and re-indexes the spans.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::mem::size_of;
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
@@ -17,6 +17,7 @@ use relate_core::{NodeId, RelId};
 use crate::memory::{fit_exact, fit_reserved, vec_growth, vec_heap, vec_heap_exact};
 
 use super::codec;
+use super::span_table::SpanTable;
 use super::Hop;
 
 /// What superseded a sealed position. The fold needs it: a deleted row has
@@ -67,22 +68,13 @@ pub(crate) struct Entry {
     pub hops: u32,
 }
 
-/// One node's entry range in the arena's entry array (ADR-0599): a dense,
-/// id-indexed span table gives each node the `[start, start + len)` slice of
-/// [`SealedArena`]'s entries its chunks occupy. Six bytes; `len == 0` is a
-/// node with no sealed chunk.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[repr(C, packed)]
-pub(crate) struct Span {
-    pub start: u32,
-    pub len: u16,
+impl Entry {
+    /// Whether the entry holds a stream — the one spelling of the fact
+    /// `mark_dead`, the compaction walk and `stream_of` all key on.
+    pub(super) fn has_stream(self) -> bool {
+        self.hops > 0
+    }
 }
-
-/// The span length's structural bound: a node holds at most this many
-/// distinct rel types in one direction. Admission enforces it before the
-/// redo is logged (ADR-0599); the arena's own arithmetic states it as the
-/// invariant that enforcement guarantees.
-pub(crate) const MAX_SPAN_TYPES: usize = u16::MAX as usize;
 
 /// One direction's sealed tier (ADR-0551 / ADR-0599): a graph-level,
 /// node-major arena of every folded chunk's encoded stream, a dense
@@ -110,7 +102,7 @@ impl Default for SealedArena {
 impl std::fmt::Debug for SealedArena {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let s = self.read();
-        let nodes = s.spans.iter().filter(|sp| sp.len > 0).count();
+        let nodes = s.spans.live_node_count();
         f.debug_struct("SealedArena")
             .field("nodes", &nodes)
             .field("entries", &s.entries.len())
@@ -120,14 +112,16 @@ impl std::fmt::Debug for SealedArena {
 }
 
 /// The sealed tier's floor split (ADR-0599): the arena byte buffer, the
-/// addressing structures around it, and the dead arena ranges awaiting
+/// addressing structures around it, and the dead arena bytes awaiting
 /// compaction. The heap census's per-side sealed terms; `arena + index` is
 /// the tier's whole floor, `dead` a subset of `arena`.
-#[cfg(feature = "research")]
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct SealedTierBytes {
     pub arena: u64,
     pub index: u64,
+    /// The dead arena ranges' share — emitted in a research-feature
+    /// build only, the heap census its one reader.
+    #[cfg(feature = "research")]
     pub dead: u64,
 }
 
@@ -141,39 +135,29 @@ struct ArenaStore {
     /// Each entry's tombstone list, a parallel column so the header stays
     /// exactly 12 bytes. Same length as `entries`, kept in lockstep.
     tombstones: Vec<Vec<Tombstone>>,
-    /// Dense, id-indexed span table: `spans[node]` is the node's live entry
-    /// range. A node with `len == 0` has no sealed chunk.
-    spans: Vec<Span>,
-    /// The side map for an id whose dense span array does not fit
-    /// (ADR-0086/0532), so one wide id cannot reserve gigabytes.
-    overflow: HashMap<NodeId, Span>,
-    /// The arena ranges a fold replaced, awaiting compaction (ADR-0599).
-    dead: Vec<(u32, u32)>,
-    /// High-water mark of every live span's start, never decreased (a
-    /// stale-high mark only costs one shift scan). A mid-array entry
-    /// insert/remove whose node-span ends past it cannot shift any other
-    /// span, so the scan is skipped — the wholesale build's every insert.
-    max_start: usize,
+    /// The per-node span table (ADR-0599): each node's live entry range,
+    /// the wide-id side map, and the shift scans' high-water start.
+    spans: SpanTable,
+    /// The dead arena bytes awaiting compaction (ADR-0599): the sum of
+    /// every replaced stream's length. The ranges themselves are never
+    /// read — the compaction walk re-derives the live layout — so only
+    /// the sum is kept.
+    dead_bytes: u64,
 }
 
-/// Whether `idx` can have a dense span slot — inside the reserved cap.
-fn dense_slot(idx: usize) -> bool {
-    crate::memory::reservable_span_bytes(idx + 1, size_of::<Span>() as u64).is_some()
+/// The arena's 4 GiB admission wall: whether `arena_bytes` plus a
+/// write's `growth` still fits the `u32` offset space — the one
+/// predicate the under-lock recheck and the admission pre-check both
+/// consult.
+pub(crate) fn arena_admits(arena_bytes: u64, growth: u64) -> bool {
+    arena_bytes.saturating_add(growth) <= u32::MAX as u64
 }
 
-/// A span start from an entry-array index, at the structural boundary the
-/// span arithmetic relies on: the shift pass moves starts through `i32`,
-/// so the entry array stays under 2^31 entries — 24 GiB of 12-byte
-/// entries, unreachable before any real store's memory. Checked, never
-/// truncated: a silent wrap here would strand a node's whole span.
-fn span_start(idx: usize) -> u32 {
-    i32::try_from(idx).expect("the entry array stays under 2^31 entries") as u32
-}
-
-/// A span length from an entry count, at the chunk-type cap the u16 field
-/// states: a node's span counts its distinct rel types, at most 65535.
-fn span_len(len: usize) -> u16 {
-    u16::try_from(len).expect("a node holds at most 65535 rel types")
+/// An arena byte length at the `u32` offset field's structural boundary —
+/// the 4 GiB wall — checked, never truncated. The one spelling every
+/// writer of an entry's stream offset routes through.
+fn arena_offset(len: usize) -> u32 {
+    u32::try_from(len).expect("the arena stays under 4 GiB")
 }
 
 /// A chunk's hop count at the `u32` field's structural boundary — checked,
@@ -183,40 +167,27 @@ pub(crate) fn hop_count(len: usize) -> u32 {
     u32::try_from(len).expect("an adjacency chunk holds at most u32::MAX hops")
 }
 
-/// A span start shifted by `delta`, at the same entry-array ceiling
-/// [`span_start`] states: the shift pass moves starts through `i32`, so the
-/// value stays inside `i32` — checked, never wrapped.
-fn shifted_start(start: u32, delta: i32) -> u32 {
-    let shifted = i32::try_from(start).expect("the entry array stays under 2^31 entries") + delta;
-    u32::try_from(shifted).expect("a shifted span start stays non-negative")
-}
-
 impl ArenaStore {
-    fn span_of(&self, node: NodeId) -> Span {
-        if let Ok(i) = usize::try_from(node) {
-            if i < self.spans.len() {
-                let s = self.spans[i];
-                if s.len > 0 {
-                    return s;
-                }
-            }
-        }
-        self.overflow.get(&node).copied().unwrap_or_default()
-    }
-
     fn range_of(&self, node: NodeId) -> std::ops::Range<usize> {
-        let s = self.span_of(node);
-        let start = s.start as usize;
-        start..start + s.len as usize
+        self.spans.of(node).range()
     }
 
     /// The entry index of `type_id` in `node`'s span, or `None`.
     fn entry_index(&self, node: NodeId, type_id: u32) -> Option<usize> {
+        self.span_search(node, type_id).ok()
+    }
+
+    /// Search `node`'s span for `type_id` — the one type-sorted lookup,
+    /// returning the entry's absolute index or the position its type
+    /// sorts at. A hole span's range is empty and its `Err` is never
+    /// read: the founding arm computes its own tail position, and
+    /// `entry_index` keeps only the `Ok`.
+    fn span_search(&self, node: NodeId, type_id: u32) -> Result<usize, usize> {
         let r = self.range_of(node);
-        self.entries[r.clone()]
-            .binary_search_by_key(&type_id, |e| e.type_id)
-            .ok()
-            .map(|i| r.start + i)
+        match self.entries[r.clone()].binary_search_by_key(&type_id, |e| e.type_id) {
+            Ok(i) => Ok(r.start + i),
+            Err(i) => Err(r.start + i),
+        }
     }
 
     /// The bytes of entry `i`'s stream.
@@ -226,107 +197,54 @@ impl ArenaStore {
         &self.bytes[off..off + codec::stream_len(&self.bytes[off..], e.hops as usize)]
     }
 
-    /// Mark entry `e`'s stream dead: its arena range is reclaimed at the
-    /// next compaction.
-    fn mark_dead(&mut self, e: Entry) {
-        if e.hops > 0 {
-            let off = e.off as usize;
-            let len = codec::stream_len(&self.bytes[off..], e.hops as usize);
-            // The end stays inside the arena's 4 GiB because both ends
-            // derive from its length — checked, never wrapped.
-            let end = u32::try_from(off + len).expect("the arena stays under 4 GiB");
-            self.dead.push((e.off, end));
-            fit_reserved(&mut self.dead);
-        }
-    }
-
-    /// Set `node`'s span to `(start, len)`, in the dense array when it fits
-    /// and the side map otherwise. `len == 0` clears it.
-    fn set_span(&mut self, node: NodeId, start: u32, len: u16) {
-        let Ok(idx) = usize::try_from(node) else {
-            self.overflow.remove(&node);
-            return;
-        };
-        if len == 0 {
-            if idx < self.spans.len() {
-                self.spans[idx] = Span::default();
-            }
-            self.overflow.remove(&node);
+    /// Mark entry `i`'s stream dead: its bytes are reclaimed at the next
+    /// compaction. The stream length comes from the one reader,
+    /// [`ArenaStore::stream_of`].
+    fn mark_dead(&mut self, i: usize) {
+        let e = self.entries[i];
+        if !e.has_stream() {
             return;
         }
-        if dense_slot(idx) {
-            if idx >= self.spans.len() {
-                self.spans.resize(idx + 1, Span::default());
-                fit_reserved(&mut self.spans);
-            }
-            self.spans[idx] = Span { start, len };
-            self.overflow.remove(&node);
-        } else {
-            self.overflow.insert(node, Span { start, len });
-        }
-        // The high-water mark of live span starts, for the shift scans an
-        // insert or remove can skip (see [`ArenaStore::shift_spans`]'s
-        // callers): never decreased, so a stale high only costs one scan.
-        self.max_start = self.max_start.max(start as usize);
+        let len = self.stream_of(i).len();
+        debug_assert!(
+            arena_admits(e.off as u64, len as u64),
+            "a dead stream stays under the arena wall"
+        );
+        self.dead_bytes += len as u64;
     }
 
-    /// Shift every span whose start is at or after `pos` by `delta` (+1 on an
-    /// insert, -1 on a remove), skipping `node`'s own span. The dense and
-    /// overflow loops share one checked shift, and the high-water start
-    /// follows a shifted span up — a stale-low mark would skip a needed
-    /// scan.
-    fn shift_spans(&mut self, skip: NodeId, pos: usize, delta: i32) {
-        for i in 0..self.spans.len() {
-            if i as NodeId == skip {
-                continue;
-            }
-            let mut s = self.spans[i];
-            if s.len > 0 && s.start as usize >= pos {
-                s.start = shifted_start(s.start, delta);
-                self.max_start = self.max_start.max(s.start as usize);
-                self.spans[i] = s;
-            }
-        }
-        for (node, s) in self.overflow.iter_mut() {
-            if *node != skip && s.len > 0 && s.start as usize >= pos {
-                s.start = shifted_start(s.start, delta);
-                self.max_start = self.max_start.max(s.start as usize);
-            }
-        }
-    }
-
-    /// Whether any live span other than `skip`'s starts at or after `pos` —
-    /// false means the shift scan would move nothing and is skipped. Spans
-    /// are disjoint, so a mid-span insert/remove at `pos` can only shift
-    /// spans starting at or past the node's own span end; the high-water
-    /// start below that end says none exist.
-    fn shift_needed(&self, skip_end: usize) -> bool {
-        self.max_start >= skip_end
+    /// Overwrite entry `i`, marking the entry it replaces dead first —
+    /// a founded entry's zero-hop placeholder tallies nothing.
+    fn replace_entry(&mut self, i: usize, entry: Entry) {
+        self.mark_dead(i);
+        self.entries[i] = entry;
     }
 
     /// Insert a new zero-hop entry into `node`'s span, keeping it
     /// type-sorted and shifting every later node's span. Returns the index.
     fn insert_entry(&mut self, node: NodeId, type_id: u32) -> usize {
-        let r = self.range_of(node);
-        if r.is_empty() {
-            let idx = self.entries.len();
-            self.entries.push(Entry {
-                type_id,
-                off: 0,
-                hops: 0,
-            });
-            self.tombstones.push(Vec::new());
-            fit_reserved(&mut self.entries);
-            fit_reserved(&mut self.tombstones);
+        let s = self.spans.of(node);
+        if !s.is_live() {
             // A fresh span at the array's tail: no live span starts at or
             // after it, so there is nothing to shift.
-            self.set_span(node, span_start(idx), 1);
+            let idx = self.entries.len();
+            self.insert_columns(idx, type_id);
+            self.spans.set(node, idx, 1);
             return idx;
         }
-        let pos = r.start
-            + self.entries[r.clone()]
-                .binary_search_by_key(&type_id, |e| e.type_id)
-                .unwrap_err();
+        let pos = self
+            .span_search(node, type_id)
+            .expect_err("a founded type sorts to a gap in its live span");
+        self.insert_columns(pos, type_id);
+        // The span grows by one entry, shifting what its own bound says.
+        self.spans.grow(node);
+        pos
+    }
+
+    /// Insert a zero-hop entry and its tombstone slot at `pos` — the
+    /// columns stay in lockstep through this one writer, an append
+    /// included (`pos == entries.len()`).
+    fn insert_columns(&mut self, pos: usize, type_id: u32) {
         self.entries.insert(
             pos,
             Entry {
@@ -338,42 +256,26 @@ impl ArenaStore {
         self.tombstones.insert(pos, Vec::new());
         fit_reserved(&mut self.entries);
         fit_reserved(&mut self.tombstones);
-        // Only spans at or past this node's span end can shift; past the
-        // high-water start there are none, and the wholesale build — whose
-        // every insert extends the newest span — skips every scan.
-        if self.shift_needed(r.end) {
-            self.shift_spans(node, pos, 1);
-        }
-        let s = self.span_of(node);
-        let len = s
-            .len
-            .checked_add(1)
-            .expect("a node holds at most 65535 rel types");
-        self.set_span(node, s.start, len);
-        pos
     }
 
-    /// Remove entry `i` from `node`'s span, shifting every later node's span.
-    fn remove_entry(&mut self, node: NodeId, i: usize) {
+    /// Drop the entry and its tombstone slot at `i` — the removal half of
+    /// the columns' lockstep.
+    fn remove_columns(&mut self, i: usize) {
         self.entries.remove(i);
         self.tombstones.remove(i);
         fit_reserved(&mut self.entries);
         fit_reserved(&mut self.tombstones);
-        // The insert-side guard's mirror: only spans past this node's span
-        // end can shift, and past the high-water start there are none.
-        let end = {
-            let s = self.span_of(node);
-            s.start as usize + s.len as usize
-        };
-        if self.shift_needed(end) {
-            self.shift_spans(node, i + 1, -1);
-        }
-        let s = self.span_of(node);
-        let len = s
-            .len
-            .checked_sub(1)
-            .expect("a removed entry's span held at least one entry");
-        self.set_span(node, s.start, len);
+    }
+
+    /// Remove entry `i` from `node`'s span, shifting every later node's
+    /// span. The removed entry's stream dies with it — the tally is
+    /// taken here, under the same lock, so no removal path can drop
+    /// bytes from the exact-reclaim accounting.
+    fn remove_entry(&mut self, node: NodeId, i: usize) {
+        self.mark_dead(i);
+        self.remove_columns(i);
+        // The span loses one entry, shifting what its own bound says.
+        self.spans.shrink(node);
     }
 
     /// Store one type's stream and tombstones, or drop the type's entry when
@@ -392,13 +294,12 @@ impl ArenaStore {
         hops: &[Hop],
         tombstones: Vec<Tombstone>,
     ) -> bool {
+        let existing = self.entry_index(node, type_id);
         if hops.is_empty() && tombstones.is_empty() {
-            if let Some(i) = self.entry_index(node, type_id) {
-                // The stream's bytes die with the entry: once it is gone
-                // nothing names the range, so it is marked dead here or
-                // compaction's exact-reclaim invariant trips (the bytes
-                // would vanish from the arena without ever being dead).
-                self.mark_dead(self.entries[i]);
+            if let Some(i) = existing {
+                // The stream's bytes die with the entry — remove_entry
+                // takes the tally, so nothing vanishes from the arena
+                // without ever being dead.
                 self.remove_entry(node, i);
             }
             return true;
@@ -407,30 +308,29 @@ impl ArenaStore {
         // The walls under this lock, in the same spelling the fold's
         // pre-check uses: a founding needs a span slot, and the stream —
         // at the codec's own bound — must keep the arena under the offset.
-        let founding = self.entry_index(node, type_id).is_none();
-        if founding && self.span_of(node).len as usize >= MAX_SPAN_TYPES {
+        let existing = self.entry_index(node, type_id);
+        if existing.is_none() && !self.spans.has_room_for_type(node) {
             return false;
         }
-        if self.bytes.len() as u64 + stream.len() as u64 > u32::MAX as u64 {
+        if !arena_admits(self.bytes.len() as u64, stream.len() as u64) {
             return false;
         }
-        // The arena offset and the hop count, at the u32 fields' structural
-        // boundaries — checked, never truncated.
-        let off = u32::try_from(self.bytes.len()).expect("the arena stays under 4 GiB");
+        // The stream offset at the u32 field's structural boundary; a
+        // tombstone-only chunk holds no stream, so its entry's offset is
+        // the zero it is defined to hold rather than a fabricated length.
+        let off = if hops.is_empty() {
+            0
+        } else {
+            arena_offset(self.bytes.len())
+        };
         self.bytes.extend_from_slice(&stream);
         let entry = Entry {
             type_id,
             off,
             hops: hop_count(hops.len()),
         };
-        let i = match self.entry_index(node, type_id) {
-            Some(i) => {
-                self.mark_dead(self.entries[i]);
-                i
-            }
-            None => self.insert_entry(node, type_id),
-        };
-        self.entries[i] = entry;
+        let i = existing.unwrap_or_else(|| self.insert_entry(node, type_id));
+        self.replace_entry(i, entry);
         self.tombstones[i] = tombstones;
         fit_reserved(&mut self.tombstones[i]);
         true
@@ -459,7 +359,7 @@ impl ArenaStore {
             // dropped by the fold anyway (ADR-0551) — so a store whose span
             // the build clamped keeps answering its deletes, where the
             // founding would die in the write guard.
-            None if self.span_of(node).len as usize >= MAX_SPAN_TYPES => return,
+            None if !self.spans.has_room_for_type(node) => return,
             None => self.insert_entry(node, type_id),
         };
         let list = &mut self.tombstones[i];
@@ -477,8 +377,10 @@ impl ArenaStore {
         }
     }
 
-    /// Rebuild the arena compactly, dropping dead ranges and re-laying the
-    /// bytes node-major, then re-index the spans (ADR-0599).
+    /// Reclaim the arena's dead data (ADR-0599): drop the dead bytes by
+    /// re-laying the live streams in entry order — each entry's new
+    /// offset written back in place — and trim the dense span array's
+    /// trailing holes.
     fn compact(&mut self) {
         // Nothing dead means nothing to reclaim and the layout is already
         // the compact one — a store that never folded past a replacement
@@ -486,57 +388,44 @@ impl ArenaStore {
         // would copy every live stream for nothing. The fit still runs:
         // the arena is charged at its exact length, and a push-grown
         // buffer left unfitted would be charged less than it holds.
-        if self.dead.is_empty() {
-            self.fit();
-            return;
-        }
-        let dead_bytes = self.dead_bytes();
-        let before = self.bytes.len() as u64;
-        let mut bytes = Vec::with_capacity(self.bytes.len());
-        let mut entries = Vec::with_capacity(self.entries.len());
-        let mut tombstones: Vec<Vec<Tombstone>> = Vec::with_capacity(self.tombstones.len());
-        let mut nodes: Vec<NodeId> = (0..self.spans.len())
-            .filter(|i| self.spans[*i].len > 0)
-            .map(|i| i as NodeId)
-            .collect();
-        nodes.extend(
-            self.overflow
-                .iter()
-                .filter(|(_, sp)| sp.len > 0)
-                .map(|(n, _)| *n),
-        );
-        for node in nodes {
-            let s = self.span_of(node);
-            // `nodes` is every node with a live span, so this always holds;
-            // the assert guards the span arithmetic below in debug builds.
-            debug_assert!(s.len > 0, "a compaction node holds a live span");
-            let start = entries.len();
-            for i in s.start as usize..s.start as usize + s.len as usize {
+        // Only the byte buffer accrues dead data — a replaced stream's
+        // range — and the dense span array its trailing holes: the entry
+        // column and the tombstones carry live slots only (a removal
+        // deletes, a replacement overwrites), so the compaction re-lays
+        // the buffer in place, writing each surviving stream's new offset
+        // back into its entry, and trims the span tail.
+        let dead_bytes = self.dead_bytes;
+        if dead_bytes > 0 {
+            let before = self.bytes.len() as u64;
+            // The dead bytes are a share of the buffer — the tally stays at
+            // or under its length, checked here so a corrupt tally refuses
+            // rather than under-sizing the replacement.
+            let live = self
+                .bytes
+                .len()
+                .checked_sub(dead_bytes as usize)
+                .expect("the dead tally stays at or under the arena's length");
+            let mut bytes = Vec::with_capacity(live);
+            for i in 0..self.entries.len() {
                 let e = self.entries[i];
-                let off = u32::try_from(bytes.len()).expect("the arena stays under 4 GiB");
-                if e.hops > 0 {
-                    let off_old = e.off as usize;
-                    let len = codec::stream_len(&self.bytes[off_old..], e.hops as usize);
-                    bytes.extend_from_slice(&self.bytes[off_old..off_old + len]);
+                if !e.has_stream() {
+                    continue;
                 }
-                entries.push(Entry {
-                    type_id: e.type_id,
-                    off,
-                    hops: e.hops,
-                });
-                tombstones.push(std::mem::take(&mut self.tombstones[i]));
+                let off = arena_offset(bytes.len());
+                bytes.extend_from_slice(self.stream_of(i));
+                // The write-back lands after the copy, and every later entry
+                // still holds the offset it was laid at.
+                self.entries[i].off = off;
             }
-            self.set_span(node, span_start(start), span_len(entries.len() - start));
+            debug_assert_eq!(
+                before - bytes.len() as u64,
+                dead_bytes,
+                "compaction reclaims exactly the dead bytes"
+            );
+            self.bytes = bytes;
+            self.dead_bytes = 0;
         }
-        debug_assert_eq!(
-            before - bytes.len() as u64,
-            dead_bytes,
-            "compaction reclaims exactly the dead ranges"
-        );
-        self.bytes = bytes;
-        self.entries = entries;
-        self.tombstones = tombstones;
-        self.dead.clear();
+        self.spans.trim_tail();
         self.fit();
     }
 
@@ -548,8 +437,7 @@ impl ArenaStore {
         fit_exact(&mut self.bytes);
         fit_reserved(&mut self.entries);
         fit_reserved(&mut self.tombstones);
-        fit_reserved(&mut self.spans);
-        fit_reserved(&mut self.dead);
+        self.spans.fit();
     }
 
     /// The arena byte buffer charged at its exact encoded length (ADR-0599).
@@ -569,28 +457,13 @@ impl ArenaStore {
                 .sum::<u64>()
     }
 
-    /// The dense span table and the wide-id side map.
-    fn span_bytes(&self) -> u64 {
-        vec_heap(self.spans.len(), size_of::<Span>() as u64)
-            + self.overflow.len() as u64
-                * crate::memory::overflow_entry_bytes(size_of::<Span>() as u64)
-    }
-
-    /// The dead-range bookkeeping vec.
-    fn dead_heap(&self) -> u64 {
-        vec_heap(self.dead.len(), size_of::<(u32, u32)>() as u64)
-    }
-
-    /// Bytes of the dead arena ranges awaiting compaction.
-    fn dead_bytes(&self) -> u64 {
-        self.dead.iter().map(|(a, b)| (b - a) as u64).sum()
-    }
-
-    /// The whole tier's reserved heap minus the span table: the arena byte
-    /// buffer, the entry array, the tombstone column, and the dead-range
-    /// bookkeeping.
+    /// The whole tier's reserved heap minus the span table: the arena
+    /// byte buffer, the entry array, and the tombstone column — the test
+    /// oracle's split of [`SealedArena::tier_bytes`]; the dead bytes are
+    /// the scalar [`ArenaStore::dead_bytes`], not a heap term.
+    #[cfg(test)]
     fn floor_bytes(&self) -> u64 {
-        self.arena_bytes() + self.entry_bytes() + self.dead_heap()
+        self.arena_bytes() + self.entry_bytes()
     }
 }
 
@@ -606,7 +479,7 @@ impl SealedArena {
     /// The node's sealed region — a cheap handle that re-locks per access —
     /// or `None` when the node has no sealed chunk.
     pub(crate) fn region(&self, node: NodeId) -> Option<SealedRegion<'_>> {
-        if self.read().span_of(node).len == 0 {
+        if self.read().spans.of(node).len == 0 {
             None
         } else {
             Some(SealedRegion { arena: self, node })
@@ -634,10 +507,12 @@ impl SealedArena {
             .tombstone_deleted(node, type_id, id, ts, supersede);
     }
 
-    /// The tier's reserved heap minus the span table — the arena bytes, the
-    /// entry column and the dead-range bookkeeping. [`Self::array_bytes`]
-    /// carries the span table beside it, so the two compose the whole tier
-    /// (the heap census's `arena` and `index` split).
+    /// The tier's reserved heap minus the span table — the arena bytes and
+    /// the entry column. [`Self::array_bytes`] carries the span table
+    /// beside it, so the two compose the whole tier (the heap census's
+    /// `arena` and `index` split); the dead bytes are the scalar
+    /// [`ArenaStore::dead_bytes`], not a heap term.
+    #[cfg(test)]
     pub(crate) fn floor_bytes(&self) -> u64 {
         self.read().floor_bytes()
     }
@@ -645,8 +520,9 @@ impl SealedArena {
     /// Reserved bytes of the span table — the dense array plus one side-map
     /// entry per wide id (the span-table share of the heap census's sealed
     /// `index_bytes`).
+    #[cfg(test)]
     pub(crate) fn array_bytes(&self) -> u64 {
-        self.read().span_bytes()
+        self.read().spans.table_bytes()
     }
 
     /// The arena byte buffer at its exact encoded length — the admission
@@ -667,33 +543,29 @@ impl SealedArena {
         (s.entries.len(), s.tombstones.len())
     }
 
-    /// The tier's floor split (ADR-0599), the heap census's per-side view:
-    /// the arena byte buffer charged at its exact encoded length, the
-    /// addressing structures around it — the entry array, the tombstone
-    /// column, the span table, the side map, and the dead-range bookkeeping —
-    /// and the dead arena ranges awaiting compaction, the share of `arena`
-    /// the next checkpoint fold reclaims.
-    #[cfg(feature = "research")]
+    /// The tier's floor split (ADR-0599) — the one composition of the
+    /// tier's whole floor, which the recount's floor and the heap census
+    /// both read: the arena byte buffer charged at its exact encoded
+    /// length, the addressing structures around it — the entry array, the
+    /// tombstone column, the span table, and the side map — and, in a
+    /// research-feature build, the dead arena bytes awaiting compaction
+    /// ([`ArenaStore::dead_bytes`]), the share of `arena` the next
+    /// checkpoint fold reclaims.
     pub(crate) fn tier_bytes(&self) -> SealedTierBytes {
         let s = self.read();
         SealedTierBytes {
             arena: s.arena_bytes(),
-            index: s.entry_bytes() + s.dead_heap() + s.span_bytes(),
-            dead: s.dead_bytes(),
+            index: s.entry_bytes() + s.spans.table_bytes(),
+            #[cfg(feature = "research")]
+            dead: s.dead_bytes,
         }
     }
 
     pub(crate) fn clear(&self) {
-        let mut s = self.write();
-        s.bytes = Vec::new();
-        s.entries = Vec::new();
-        s.tombstones = Vec::new();
-        s.spans = Vec::new();
-        s.overflow = HashMap::new();
-        s.dead = Vec::new();
-        // The span table is empty: a stale high-water start would make the
-        // next build's inserts scan the (still empty) table for nothing.
-        s.max_start = 0;
+        // The whole state is replaced, not reset field by field: a
+        // hand-listed reset already drifted once in this file's history
+        // (it dropped the dead ranges).
+        *self.write() = ArenaStore::default();
     }
 
     /// The arena's live byte length and its dead ranges' byte sum — the
@@ -702,7 +574,7 @@ impl SealedArena {
     #[cfg(test)]
     pub(crate) fn reclaim_pair(&self) -> (u64, u64) {
         let s = self.read();
-        (s.bytes.len() as u64, s.dead_bytes())
+        (s.bytes.len() as u64, s.dead_bytes)
     }
 
     /// Compact the arena: drop the dead ranges and re-lay the live streams
@@ -724,34 +596,21 @@ impl SealedArena {
     #[cfg(test)]
     pub(crate) fn assert_fit(&self) -> usize {
         use crate::memory::reserved_len;
+        fn assert_capacity<T>(v: &Vec<T>, want: usize, what: &str) {
+            assert_eq!(v.capacity(), want, "{what} holds its reservation");
+        }
         let s = self.read();
-        assert_eq!(
-            s.bytes.capacity(),
-            s.bytes.len(),
-            "the arena byte buffer is sized exactly"
-        );
-        assert_eq!(
-            s.entries.capacity(),
-            reserved_len(s.entries.len()),
-            "the entry array holds its reservation"
-        );
-        assert_eq!(
-            s.tombstones.capacity(),
+        assert_capacity(&s.bytes, s.bytes.len(), "the arena byte buffer (exact)");
+        assert_capacity(&s.entries, reserved_len(s.entries.len()), "the entry array");
+        assert_capacity(
+            &s.tombstones,
             reserved_len(s.tombstones.len()),
-            "the tombstone column holds its reservation"
+            "the tombstone column",
         );
         for t in &s.tombstones {
-            assert_eq!(
-                t.capacity(),
-                reserved_len(t.len()),
-                "a tombstone vec holds its reservation"
-            );
+            assert_capacity(t, reserved_len(t.len()), "a tombstone vec");
         }
-        assert_eq!(
-            s.spans.capacity(),
-            reserved_len(s.spans.len()),
-            "the span table holds its reservation"
-        );
+        s.spans.assert_fit();
         s.tombstones.iter().filter(|t| !t.is_empty()).count()
     }
 }

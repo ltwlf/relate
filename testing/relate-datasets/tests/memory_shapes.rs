@@ -34,11 +34,16 @@ use relate_datasets::shapes::{
 // relationship-free shapes are untouched.
 // ADR-0589: each distinct label set adds one entry to the label-set map
 // (148 bytes for a one-label set): flat and ring carry one set, fanout two.
+// ADR-0617: the dense span arrays reserve the smaller of the 1.5 ladder
+// and the doubling. The Small shapes' 1,000-span arrays sit on the
+// doubling's own rung (1,024), so their pins stand; dense ring's
+// relationship span (8,008) passes the ladder's 8,090 rung below the
+// doubling's 8,192, so it drops 14,688.
 const BASE: u64 = 258;
 const RING: u64 = 559_784;
 const FANOUT: u64 = 503_886;
 const FLAT: u64 = 222_688;
-const DENSE_RING: u64 = 2_128_986;
+const DENSE_RING: u64 = 2_114_298;
 /// One label set like ring and dense ring (ADR-0589's +148), one node
 /// label count entry, and the same per-relationship terms as dense ring
 /// at 96,512 relationships — 12× dense ring's volume. The adjacency is

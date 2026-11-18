@@ -598,7 +598,7 @@ fn place(span: &mut usize, node: NodeId, slot: u64) -> PlacementCharge {
             dense: 0,
             side_entry: false,
         },
-        Some(crate::memory::SpanPlacement::Grew(bytes)) => PlacementCharge {
+        Some(crate::memory::SpanPlacement::Grew { bytes, .. }) => PlacementCharge {
             dense: bytes as i64,
             side_entry: false,
         },
@@ -712,7 +712,7 @@ impl<'a> TypeWall<'a> {
 /// the entry offsets address. Saturating so an over-bound store refuses,
 /// never wraps.
 pub(super) fn sealed_arena_breaches(arena_bytes: u64, growth: u64) -> bool {
-    arena_bytes.saturating_add(growth) > u32::MAX as u64
+    !crate::adjacency::arena_admits(arena_bytes, growth)
 }
 
 impl Graph {
@@ -726,8 +726,9 @@ impl Graph {
             .sides(relate_ir::Direction::Both)
             .map(|(side, _)| side.sealed())
         {
-            n = n.saturating_add(sealed.array_bytes());
-            n = n.saturating_add(sealed.floor_bytes());
+            let tier = sealed.tier_bytes();
+            n = n.saturating_add(tier.arena);
+            n = n.saturating_add(tier.index);
         }
         n
     }
@@ -835,11 +836,13 @@ fn price_sealed_node(
     supersede: Supersede,
 ) -> (i64, i64) {
     if region.is_none() && supersede == Supersede::Deleted {
-        match crate::memory::place_in_span(span, node, sealed_slot) {
-            None | Some(crate::memory::SpanPlacement::Inside) => {}
-            Some(crate::memory::SpanPlacement::Grew(bytes)) => return (bytes as i64, 0),
-            Some(crate::memory::SpanPlacement::SideEntry) => return (0, sealed_overflow as i64),
-        }
+        // The one placement mapping, shared with the create loop: dense
+        // growth is permanent structure, the side entry reclaimable.
+        let charge = place(span, node, sealed_slot);
+        return (
+            charge.dense,
+            i64::from(charge.side_entry) * sealed_overflow as i64,
+        );
     }
     (0, 0)
 }

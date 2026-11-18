@@ -44,24 +44,7 @@ fn reposition_sealed_charge_prices_the_price_side_arms() {
 #[test]
 fn a_fully_reclaimed_chunk_marks_its_stream_dead_before_the_entry_goes() {
     let g = Graph::default();
-    let (a, _, ids, _) = crate::graph::test_support::folded_floor_chunk(&g);
-    let (arena, dead) = g.out_side().sealed().reclaim_pair();
-    assert_eq!(dead, 0);
-    assert!(arena > 0, "the seal left the chunk's stream in the arena");
-
-    g.begin_write().unwrap();
-    for id in &ids {
-        g.delete_rel(*id);
-    }
-    g.commit_write();
-
-    // The checkpoint fold past every delete stamp reclaims the whole
-    // chunk: the entry goes, the stream turns dead.
-    g.fold_adjacency_at_watermark(u64::MAX);
-    assert!(
-        g.out_side().sealed().region(a).is_none(),
-        "the emptied region goes"
-    );
+    let (_, arena) = crate::graph::test_support::reclaimed_folded_chunk(&g);
     let (_, dead) = g.out_side().sealed().reclaim_pair();
     assert_eq!(
         dead, arena,
@@ -72,4 +55,24 @@ fn a_fully_reclaimed_chunk_marks_its_stream_dead_before_the_entry_goes() {
     // states the equality this pins from outside.
     g.out_side().sealed().compact();
     assert_eq!(g.out_side().sealed().reclaim_pair(), (0, 0));
+}
+
+/// A wiped arena drops its dead ranges with everything else — a clear
+/// that kept them would leave the wipe charging (and holding) ranges no
+/// live entry points at.
+#[test]
+fn a_wipe_drops_the_dead_ranges_too() {
+    let g = Graph::default();
+    let (_, arena) = crate::graph::test_support::reclaimed_folded_chunk(&g);
+    let (_, dead) = g.out_side().sealed().reclaim_pair();
+    assert_eq!(dead, arena, "the reclaimed stream is dead, not compacted");
+
+    g.out_side().sealed().clear();
+    assert_eq!(
+        g.out_side().sealed().reclaim_pair(),
+        (0, 0),
+        "the wipe drops the arena, its entries and the dead ranges"
+    );
+    assert_eq!(g.out_side().sealed().floor_bytes(), 0);
+    assert_eq!(g.out_side().sealed().array_bytes(), 0);
 }

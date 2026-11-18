@@ -57,3 +57,9 @@ The reserved capacity rounds up to a power of two, so a store just past
 a boundary carries spare slots. A deleted id keeps its slot until the
 process drops the graph. Readers block on a writer for the whole store,
 not one shard; guards stay short, as they were.
+
+## Later references
+
+- ADR-0617 replaces the power-of-two reservation of the dense span arrays
+  with a 1.5 growth ladder; the side map, the dense-span byte cap, and
+  everything else here stand.

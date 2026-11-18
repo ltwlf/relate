@@ -14,7 +14,9 @@
 //! [`reserved_len`]`(n)` elements, not for whatever the allocator rounded
 //! the allocation up to — except the sealed arena's immutable byte buffer,
 //! sized once per compaction and charged for exactly its length
-//! ([`vec_heap_exact`], ADR-0599).
+//! ([`vec_heap_exact`], ADR-0599), and the dense span arrays, which
+//! reserve and charge the 1.5 growth ladder ([`dense_reserved`],
+//! ADR-0617).
 
 mod account;
 
@@ -107,8 +109,10 @@ pub fn vec_growth(len: usize, added: usize, elem: u64) -> u64 {
 pub enum SpanPlacement {
     /// Already inside the span: no dense growth, no side-map entry.
     Inside,
-    /// The array grew to cover the id: the dense bytes it gained.
-    Grew(u64),
+    /// The array grew to cover the id: the span it grew to (`idx + 1`,
+    /// the gate's own number — a consumer never re-derives it) and the
+    /// dense bytes it gained.
+    Grew { span: usize, bytes: u64 },
     /// The id cannot be placed in the array: it takes a side-map entry.
     SideEntry,
 }
@@ -124,7 +128,10 @@ impl SpanPlacement {
             return SpanPlacement::Inside;
         }
         match reservable_span_bytes(need, slot) {
-            Some(after) => SpanPlacement::Grew(after.saturating_sub(id_vec_bytes(span, slot))),
+            Some(after) => SpanPlacement::Grew {
+                span: need,
+                bytes: after.saturating_sub(id_vec_bytes(span, slot)),
+            },
             None => SpanPlacement::SideEntry,
         }
     }
@@ -141,8 +148,8 @@ impl SpanPlacement {
 pub fn place_in_span(span: &mut usize, id: i64, slot: u64) -> Option<SpanPlacement> {
     let idx = usize::try_from(id).ok()?;
     let placement = SpanPlacement::classify(*span, idx, slot);
-    if matches!(placement, SpanPlacement::Grew(_)) {
-        *span = idx.saturating_add(1);
+    if let SpanPlacement::Grew { span: to, .. } = placement {
+        *span = to;
     }
     Some(placement)
 }
@@ -171,6 +178,63 @@ pub(crate) fn fit_reserved<T>(v: &mut Vec<T>) {
 /// [`vec_heap_exact`], not [`vec_heap`].
 pub(crate) fn fit_exact<T>(v: &mut Vec<T>) {
     fit_capacity(v, v.len());
+}
+
+/// Grow `v` so `capacity == dense_reserved(len)` — the dense span arrays'
+/// counterpart of [`fit_reserved`] (ADR-0617). A live span's ladder value
+/// exists by construction: its current allocation proves the length fits.
+pub(crate) fn fit_dense_reserved<T>(v: &mut Vec<T>) {
+    let want = dense_reserved(v.len()).expect("a live span's ladder rung fits");
+    fit_capacity(v, want);
+}
+
+/// Extend a dense span array from its length to `new_len`, reserving the
+/// rung exactly — the one grow path of the dense span arrays (ADR-0617),
+/// the id stores' `try_grow` and the sealed tier's span table both taking
+/// it. The rung is never reserved through the amortized doubling: a
+/// doubled buffer freed back to the rung parks in the allocator's
+/// footprint, one crossing peaking at four-plus rungs of the array.
+/// `false` is the side-map answer — the gate's `Grew` already proved the
+/// rung exists, so a refusal here is the allocation itself failing.
+pub(crate) fn grow_dense_reserved<T>(
+    v: &mut Vec<T>,
+    new_len: usize,
+    fill: impl FnMut() -> T,
+) -> bool {
+    debug_assert!(new_len >= v.len(), "a span array only grows");
+    let want = dense_reserved(new_len).expect("the gate's Grew answer proved the rung exists");
+    if v.try_reserve_exact(want - v.len()).is_err() {
+        return false;
+    }
+    v.resize_with(new_len, fill);
+    fit_capacity(v, want);
+    true
+}
+
+/// The gate's three classes as one dense-or-side answer for a caller that
+/// can grow its array: `true` places in the dense array — grown on the
+/// ladder when the gate says so — and `false` is the side map. The one
+/// application of the placement policy every dense span store takes;
+/// `fill` constructs the growth's new slots.
+pub fn dense_or_side<T>(
+    dense: &mut Vec<T>,
+    idx: usize,
+    slot: u64,
+    fill: impl FnMut() -> T,
+) -> bool {
+    match SpanPlacement::classify(dense.len(), idx, slot) {
+        SpanPlacement::Inside => true,
+        SpanPlacement::Grew { span, .. } => grow_dense_reserved(dense, span, fill),
+        SpanPlacement::SideEntry => false,
+    }
+}
+
+/// Reserved bytes of a dense span array plus its side map: the dense
+/// slots at the ladder reservation ([`id_vec_bytes`]) and one map entry
+/// per wide id. The one charge of a span table — the id stores and the
+/// sealed tier's span table both read it.
+pub fn span_table_bytes(span: usize, slot: u64, side: usize, value: u64) -> u64 {
+    id_vec_bytes(span, slot) + side as u64 * overflow_entry_bytes(value)
 }
 
 /// The shape of one id's version slot (ADR-0529).
@@ -214,19 +278,45 @@ impl ChainShape {
 /// admission runs (ADR-0086, ADR-0532).
 pub const DENSE_SPAN_CAP_BYTES: u64 = 1 << 30;
 
-/// Reserved bytes of a dense id span, or `None` when the power-of-two
-/// reservation does not fit in `u64`. That id cannot have a slot array
-/// (ADR-0532) and lives in the store's side map instead.
+/// Reserved bytes of a dense id span at the ladder reservation of
+/// [`dense_reserved`], or `None` when that product does not fit in
+/// `u64`. That id cannot have a slot array (ADR-0532) and lives in the
+/// store's side map instead.
 pub fn dense_span_bytes(span: usize, slot: u64) -> Option<u64> {
+    (dense_reserved(span)? as u64).checked_mul(slot)
+}
+
+/// Capacity a dense span array reserves for `span` ids (ADR-0617): the
+/// smaller of the 1.5 growth ladder's rung (1, 2, 4, 7, 11, …) and the
+/// old doubling, each taken at or above `span`. `None` when neither can
+/// represent `span` in a `usize` — the same degradation the doubling had,
+/// the side map.
+///
+/// The ladder alone caps the slack below 1.5x where the doubling capped
+/// it below 2x, but a span sitting just under a doubling rung the ladder
+/// overshoots would reserve MORE than the doubling held — an SF1-sized
+/// relationship array regresses ~160 MiB on the pure ladder. Taking the
+/// smaller keeps every span at or below the doubling's reservation and
+/// every ladder win where the ladder is the smaller: pointwise never
+/// worse, slack still below 1.5x. Growth stays amortized O(1) with a
+/// worse copy constant — the merged rung sequence interleaves an
+/// occasional small step between the big ones. Ordinary push-grown
+/// vectors keep [`reserved_len`]; this is the dense span arrays' one
+/// spelling, the charge ([`dense_span_bytes`]) and the reservation
+/// ([`fit_dense_reserved`]) both reading it.
+pub fn dense_reserved(span: usize) -> Option<usize> {
     if span == 0 {
         return Some(0);
     }
-    let reserved = span.checked_next_power_of_two()?;
-    (reserved as u64).checked_mul(slot)
+    let mut rung = 1usize;
+    while rung < span {
+        rung = rung.checked_add(rung >> 1)?.checked_add(1)?;
+    }
+    Some(rung.min(span.checked_next_power_of_two()?))
 }
 
 /// Dense reservation a store will allocate for `span`. `None` when the
-/// power-of-two product overflows `u64` or exceeds
+/// ladder product overflows `u64` or exceeds
 /// [`DENSE_SPAN_CAP_BYTES`]: that id is a side-map entry, the same gate
 /// the store uses when it grows.
 pub fn reservable_span_bytes(span: usize, slot: u64) -> Option<u64> {

@@ -55,6 +55,28 @@ pub(crate) fn folded_floor_chunk(g: &Graph) -> (NodeId, NodeId, Vec<RelId>, u32)
     (a, b, ids, type_id)
 }
 
+/// The reclaim sequence two sealed-arena tests share: a folded chunk whose
+/// every rel is deleted and folded away, leaving the chunk's whole stream
+/// dead and its region gone. Returns the node and the arena length the
+/// stream held.
+pub(crate) fn reclaimed_folded_chunk(g: &Graph) -> (NodeId, u64) {
+    let (a, _, ids, _) = folded_floor_chunk(g);
+    let (arena, dead) = g.out_side().sealed().reclaim_pair();
+    assert_eq!(dead, 0);
+    assert!(arena > 0, "the seal left the chunk's stream in the arena");
+    g.begin_write().unwrap();
+    for id in &ids {
+        g.delete_rel(*id);
+    }
+    g.commit_write();
+    g.fold_adjacency_at_watermark(u64::MAX);
+    assert!(
+        g.out_side().sealed().region(a).is_none(),
+        "the emptied region goes"
+    );
+    (a, arena)
+}
+
 /// The adversarial multigraph's nodes, `(name, labels)` in creation order
 /// — the LABS-1293 differential corpus: self-loops at the start, middle
 /// and end, parallel same-type and cross-type edges, reciprocal pairs, a

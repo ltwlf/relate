@@ -234,7 +234,7 @@ fn print_census(c: &HeapCensus) {
     );
     line(
         "out adjacency (sealed)",
-        c.out.sealed_bytes,
+        c.out.sealed_bytes(),
         format!(
             "arena {:.1} MB, index {:.1} MB, dead {:.1} MB",
             mb(c.out.arena_bytes),
@@ -252,7 +252,7 @@ fn print_census(c: &HeapCensus) {
     );
     line(
         "in adjacency (sealed)",
-        c.r#in.sealed_bytes,
+        c.r#in.sealed_bytes(),
         format!(
             "arena {:.1} MB, index {:.1} MB, dead {:.1} MB",
             mb(c.r#in.arena_bytes),

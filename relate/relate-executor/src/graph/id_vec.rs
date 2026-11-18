@@ -14,7 +14,7 @@ use std::mem::size_of;
 use std::ops::{Deref, DerefMut};
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 
-use crate::memory::{fit_reserved, id_vec_bytes, overflow_entry_bytes, SpanPlacement};
+use crate::memory::{dense_or_side, span_table_bytes};
 
 /// `None` is a hole: a deleted id, or an id below the highest one stored.
 #[derive(Debug)]
@@ -152,6 +152,13 @@ fn index(id: i64) -> Option<usize> {
     usize::try_from(id).ok()
 }
 
+/// The dense slot stride — the one number the placement gate's growth and
+/// the floor's charge must price identically (ADR-0617), the id stores'
+/// counterpart of the span table's `span_stride`.
+pub(super) fn slot<T>() -> u64 {
+    size_of::<Option<T>>() as u64
+}
+
 /// Where an occupied id lives. A dense hole does not hide a side-map entry:
 /// growth can extend the vector past an id that was placed aside when its
 /// reservation did not fit.
@@ -180,23 +187,10 @@ fn occupied<T>(
 /// degradation (an id stays reachable in the side map rather than failing
 /// the write), so both collapse into the side-map answer here.
 fn try_grow<T>(dense: &mut Vec<Option<T>>, idx: usize) -> bool {
-    let slot = size_of::<Option<T>>() as u64;
-    match SpanPlacement::classify(dense.len(), idx, slot) {
-        // Inside the covered span: the caller fills the slot.
-        SpanPlacement::Inside => true,
-        // The gate refuses the id: the side map takes it, never the array.
-        SpanPlacement::SideEntry => false,
-        // Grow the dense array to cover it.
-        SpanPlacement::Grew(_) => {
-            let new_len = idx.saturating_add(1);
-            if dense.try_reserve(new_len - dense.len()).is_err() {
-                return false;
-            }
-            dense.resize_with(new_len, || None);
-            fit_reserved(dense);
-            true
-        }
-    }
+    // The id stores' binding of the one application
+    // ([`crate::memory::dense_or_side`]): Option slots filled with None,
+    // the ladder growth and the side-map answer living in memory.
+    dense_or_side(dense, idx, slot::<T>(), || None)
 }
 
 impl<T> Default for IdVec<T> {
@@ -269,10 +263,12 @@ impl<T> IdVec<T> {
     /// per id that could not join the array.
     pub(super) fn array_bytes(&self) -> u64 {
         let store = self.slots.read().expect("id store lock");
-        let slot = size_of::<Option<T>>() as u64;
-        let value = size_of::<T>() as u64;
-        id_vec_bytes(store.dense.len(), slot)
-            + store.overflow.len() as u64 * overflow_entry_bytes(value)
+        span_table_bytes(
+            store.dense.len(),
+            slot::<T>(),
+            store.overflow.len(),
+            size_of::<T>() as u64,
+        )
     }
 
     pub(super) fn contains_key(&self, id: &i64) -> bool {
@@ -460,14 +456,38 @@ mod tests {
     }
 
     #[test]
-    fn growth_reserves_the_next_power_of_two() {
+    fn growth_reserves_the_dense_ladder() {
         let ids = IdVec::new();
         for id in 0..3 {
             ids.insert(id, id);
         }
         let store = ids.slots.read().unwrap();
         assert_eq!(store.dense.len(), 3);
-        assert_eq!(store.dense.capacity(), crate::memory::reserved_len(3));
+        assert_eq!(
+            store.dense.capacity(),
+            crate::memory::dense_reserved(3).unwrap()
+        );
+    }
+
+    #[test]
+    fn a_span_just_past_a_power_of_two_stays_under_the_ladder() {
+        // 33 ids sit on the ladder's 40 rung — 7 spare slots, where the
+        // old doubling reserved 64 for 31 spare. The bound this pins is
+        // the ladder's: the reservation stays below 1.5x the span.
+        let ids = IdVec::new();
+        for id in 0..33 {
+            ids.insert(id, id);
+        }
+        // The guard is scoped to the capacity read: a store call (the
+        // array_bytes assert below) never nests inside a live read guard.
+        let reserved = ids.slots.read().unwrap().dense.capacity();
+        assert_eq!(reserved, 40);
+        assert!(reserved * 2 < 33 * 3, "the ladder stays under 1.5x");
+        let slot = size_of::<Option<i64>>() as u64;
+        assert_eq!(
+            ids.array_bytes(),
+            crate::memory::dense_span_bytes(33, slot).unwrap()
+        );
     }
 
     #[test]

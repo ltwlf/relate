@@ -75,3 +75,9 @@ makes room for a write until a checkpoint has collected the tombstones.
   cannot be computed from the redo before the write. Rejected.
 - **A second public meter for "real" bytes.** Callers of the cap and
   the pins would disagree about which number is the budget. Rejected.
+
+## Later references
+
+- ADR-0617 moves the dense span arrays' reservation and charge to a 1.5
+  growth ladder; the power-of-two charge above stands for every other
+  reserved vector.

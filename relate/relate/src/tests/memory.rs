@@ -110,24 +110,25 @@ fn logical_graph_size_limit_delete_then_create_recovers_with(
 
 #[test]
 fn logical_graph_size_limit_delete_then_create_recovers() {
-    // Sixteen unindexed string nodes fit in 5_000; the seventeenth does
+    // Seventeen unindexed string nodes fit in 5_000; the eighteenth does
     // not. The shared :Person label vector is counted once. A
     // never-updated node is an inline slot in the id array (ADR-0529,
-    // ADR-0532), and crossing sixteen reserved slots doubles that array
-    // before the next node is charged.
-    logical_graph_size_limit_delete_then_create_recovers_with(5_000, None, 16);
+    // ADR-0532), and the array's ladder reservation (ADR-0617) holds the
+    // seventeenth node on its 17-slot rung before the next crosses to 26.
+    logical_graph_size_limit_delete_then_create_recovers_with(5_000, None, 17);
 }
 
 #[test]
 fn logical_graph_size_limit_delete_then_create_recovers_text_index() {
-    // Width-3 postings on `xxxxxxxx` (6 trigrams): 140 fit in 50_000, the 141st
-    // does not. The first :Person create charges its LABEL_COUNT_ENTRY_BYTES
-    // entry. Past 128 nodes the id array reserves 256 slots (ADR-0532), and
-    // that spare capacity is what stops the fill short of the old count.
+    // Width-3 postings on `xxxxxxxx` (6 trigrams): 158 fit in 50_000, the
+    // 159th does not. The first :Person create charges its
+    // LABEL_COUNT_ENTRY_BYTES entry. Past 128 nodes the id array's ladder
+    // reservation (ADR-0617) holds 139 slots, and that smaller spare — the
+    // old doubling held 256 — is why the count rose from the old 140.
     logical_graph_size_limit_delete_then_create_recovers_with(
         50_000,
         Some("CREATE TEXT INDEX person_name FOR (n:Person) ON (n.name)"),
-        140,
+        158,
     );
 }
 

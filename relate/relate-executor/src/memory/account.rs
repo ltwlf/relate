@@ -284,7 +284,7 @@ impl<F: Fn(i64) -> ChainShape> Shapes<F> {
             // An id the array cannot index is refused by the commit's own
             // validation before anything applies, so it prices nothing.
             None | Some(SpanPlacement::Inside) => 0,
-            Some(SpanPlacement::Grew(bytes)) => bytes as i64,
+            Some(SpanPlacement::Grew { bytes, .. }) => bytes as i64,
             Some(SpanPlacement::SideEntry) => {
                 if !matches!(self.shape_of(id), ChainShape::Absent) {
                     return 0;

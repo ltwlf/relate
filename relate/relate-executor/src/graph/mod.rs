@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 use relate_catalog::{Catalog, ConstraintDef, IndexDef};
 use relate_core::{Namespace, Node, NodeId, RelId, Relationship, Result, Value};
 
-use crate::adjacency::{SealedArena, Span, TypedAdj};
+use crate::adjacency::{SealedArena, TypedAdj};
 use crate::group_key::GroupKey;
 use crate::memory::ChainShape;
 use crate::pull_identity::PullIdentityIndex;
@@ -319,21 +319,21 @@ pub(crate) fn rel_version_stride() -> u64 {
 /// One id slot, including the discriminant. The floor charges the vector
 /// of these, not a hash-map entry (ADR-0532).
 pub(crate) fn node_slot() -> u64 {
-    std::mem::size_of::<Option<Chain<LiveNode>>>() as u64
+    id_vec::slot::<Chain<LiveNode>>()
 }
 
 pub(crate) fn rel_slot() -> u64 {
-    std::mem::size_of::<Option<Chain<LiveRel>>>() as u64
+    id_vec::slot::<Chain<LiveRel>>()
 }
 
 pub(crate) fn adj_slot() -> u64 {
-    std::mem::size_of::<Option<TypedAdj>>() as u64
+    id_vec::slot::<TypedAdj>()
 }
 
 /// One sealed span-table id slot, the stride of the sealed arena's dense
-/// span array (ADR-0599).
+/// span array (ADR-0599) — the span table's own one spelling of it.
 fn sealed_slot() -> u64 {
-    std::mem::size_of::<Span>() as u64
+    crate::adjacency::span_stride()
 }
 
 pub(crate) fn node_value() -> u64 {

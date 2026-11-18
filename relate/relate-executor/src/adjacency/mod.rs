@@ -65,13 +65,15 @@ pub(crate) const RESTORE_SEAL_HOPS: usize = 4;
 /// there), so a read at 0 walks the raw physical adjacency in merged order.
 pub(crate) const PHYSICAL_READ_TS: u64 = 0;
 mod arena;
+mod span_table;
 
 /// The paging format's hop-count header writer (test-gated with `pages`).
 #[cfg(test)]
 pub(crate) use self::arena::hop_count;
 pub(crate) use self::arena::{
-    tombstone_stride, Entry, SealedArena, SealedRegion, Span, Supersede, Tombstone, MAX_SPAN_TYPES,
+    arena_admits, tombstone_stride, Entry, SealedArena, SealedRegion, Supersede, Tombstone,
 };
+pub(crate) use self::span_table::{span_stride, MAX_SPAN_TYPES};
 
 /// Bytes the entry array and its tombstone column gain from `added` new
 /// entries, at the lengths `entries`/`tombstones` hold now.
