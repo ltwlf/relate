@@ -79,12 +79,14 @@ pub(crate) fn try_fold_walk_count(ctx: &FoldCtx<'_>) -> Result<Option<FoldedRetu
         .map(flatten_and_owned)
         .unwrap_or_default();
     let stats = GraphStats::new(graph.base(), params);
+    // The compile runs the row's own proofs first, then the clause's — the
+    // row entry's order.
     let Ok(contract) = compile_frontier(
         graph.base(),
         patterns,
         MatchMode::RepeatableElements,
-        entering,
         &conjuncts,
+        std::slice::from_ref(entering),
         Consumer::WalkCount,
         &stats,
     ) else {

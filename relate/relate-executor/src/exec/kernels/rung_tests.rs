@@ -67,6 +67,26 @@ fn profile_names_the_frontier_rung_for_a_varlen_pattern() {
     );
 }
 
+/// The rung serves a clause whose driving table carries more than one
+/// row too — one frontier run per entering row — so the record names the
+/// frontier, never the walker a wider table used to fall to. Paired with
+/// the single-row pin above, this is the checkable form of "the row
+/// count is not the gate".
+#[test]
+fn profile_names_the_frontier_rung_for_a_multi_row_clause() {
+    let graph = ring_graph();
+    let records = profiled(
+        &graph,
+        "MATCH (x:Geo) WITH x LIMIT 2 \
+         MATCH (x)-[:LINK*]-(y:Geo) RETURN count(DISTINCT y.id) AS c",
+    );
+    assert_eq!(
+        served(&records).kernel,
+        Some(KernelRung::FrontierNfa),
+        "a two-row driving table is served per row by the frontier rung"
+    );
+}
+
 /// The walker is a recorded rung too, not an absent fact: a `MATCH` the
 /// traversal gates decline (a pattern outside the kernels' closed
 /// vocabulary) reports `Walker`, and no other clause of the statement

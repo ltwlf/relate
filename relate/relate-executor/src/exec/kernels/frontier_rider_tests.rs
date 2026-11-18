@@ -56,6 +56,26 @@ pub(super) fn ring_graph() -> Graph {
     b.done()
 }
 
+/// Two disjoint `Geo` triangles whose node names interleave (`g0`, `g1`,
+/// `g2`, …): the first two nodes a scan yields — `g0` in the first ring,
+/// `g1` in the second — reach *different* endpoint sets, so a clause
+/// served for only one of its two entering rows answers a different count
+/// than the clause served for both. The single-ring fixture cannot
+/// observe a dropped row: either seed reaches every node of the ring.
+fn two_rings() -> Graph {
+    let b = Builder::new();
+    let n: Vec<_> = (0..6).map(|i| b.node(&format!("g{i}"), &["Geo"])).collect();
+    // Ring A = g0, g2, g4; ring B = g1, g3, g5.
+    for ring in [[0usize, 2, 4], [1, 3, 5]] {
+        for i in 0..3 {
+            let j = (i + 1) % 3;
+            b.rel(n[ring[i]], n[ring[j]], "LINK", &[]);
+            b.rel(n[ring[j]], n[ring[i]], "LINK", &[]);
+        }
+    }
+    b.done()
+}
+
 /// A denser cyclic web: every node linked to its two ring successors in
 /// both directions (degree 4, 32 rels) — the exponential trail class at
 /// a fixture's size. Its unbounded enumeration is far too wide for a
@@ -188,6 +208,74 @@ fn profile_counters_prove_the_frontier_engagement() {
         "the edge visits ride the standard neighbor-walk read kind"
     );
     assert_eq!(record.rows, 8, "the distinct-endpoint answer: every node");
+}
+
+/// (a, multi-row half) A clause whose driving table carries more than one
+/// row is served the way the walker serves it — one frontier run per
+/// entering row — instead of falling to the trail-enumerating DFS. The
+/// fixture's two rows reach different endpoint sets, so serving only the
+/// first of them answers half the count: the assertion fails unless the
+/// rung served *every* entering row. `differential` separately pins the
+/// engagement (one clause taken, the frontier's counters non-zero), so
+/// the count is not the DFS's by default.
+#[test]
+fn a_multi_row_clause_is_served_per_row_by_the_frontier() {
+    let g = two_rings();
+    let query = "MATCH (x:Geo) WITH x LIMIT 2 \
+                 MATCH (x)-[:LINK*]-(y:Geo) RETURN count(DISTINCT y.id) AS c";
+    let engaged = differential(&g, query);
+    assert_eq!(
+        engaged.rows,
+        vec![vec![Value::Int(6)]],
+        "each entering row's run reaches its own ring: dropping either \
+         row answers 3, not 6"
+    );
+}
+
+/// (a, multi-row decline half) A row binding more than the seed-side
+/// variable still declines the clause — the `CarryingRow` proof is
+/// per row, so a wider table never buys a carry the single-row arm
+/// refuses.
+#[test]
+fn a_multi_row_clause_carrying_an_extra_binding_still_declines() {
+    let g = ring_graph();
+    differential_declined(
+        &g,
+        "UNWIND [1, 2] AS u MATCH (x:Geo {id:'n0'})-[:LINK*]-(y:Geo) \
+         RETURN count(DISTINCT y.id) AS c",
+    );
+}
+
+/// (b, cap half) A filled cap is a contract-free prefix: once it is
+/// filled, no later seed and no later row runs at all. The observable is
+/// the clause's own counters — the two-row spelling must report exactly
+/// what the one-row spelling reports, because the second row is never
+/// seeded. A cap read that answered `Some(0)` at an exactly-filled cap
+/// would run one more zero-bounded BFS per remaining row and level the
+/// counter above the single-row reference.
+#[test]
+fn a_filled_cap_stops_the_clause_before_the_next_row_runs() {
+    let g = web_graph();
+    let one_row = exec_cypher(
+        &g,
+        "MATCH (x:Web {id:'w0'}) MATCH p = (x)-[:LINK*]-(y:Web) RETURN p LIMIT 1",
+    );
+    let reference = take_frontier_counters();
+    assert_eq!(one_row.rows.len(), 1, "the cap fills on the one row");
+    let two_rows = exec_cypher(
+        &g,
+        "MATCH (x:Web) WITH x LIMIT 2 MATCH p = (x)-[:LINK*]-(y:Web) RETURN p LIMIT 1",
+    );
+    assert_eq!(
+        two_rows.rows, one_row.rows,
+        "the same capped prefix is served"
+    );
+    let engaged = take_frontier_counters();
+    assert_eq!(
+        (engaged.levels, engaged.edge_visits, engaged.endpoints),
+        (reference.levels, reference.edge_visits, reference.endpoints),
+        "the filled cap stopped the clause: the second row never ran"
+    );
 }
 
 /// (b) A capped `RETURN p LIMIT n` over an unbounded cyclic pattern: n

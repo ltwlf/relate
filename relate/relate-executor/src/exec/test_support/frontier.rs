@@ -279,8 +279,18 @@ pub(crate) fn decide<R>(
             Err(decline) => return k(Err(decline)),
         }
     };
+    // The compile's own proof order — the arity first, then the row's
+    // proofs, then the clause's — is the rung's, so a wider statement
+    // declines on the arity exactly as production reads it, never with a
+    // row-gate reason the rung cannot name for that statement.
     k(compile_frontier(
-        graph, patterns, match_mode, row, &conjuncts, consumer, &stats,
+        graph,
+        patterns,
+        match_mode,
+        &conjuncts,
+        std::slice::from_ref(row),
+        consumer,
+        &stats,
     ))
 }
 

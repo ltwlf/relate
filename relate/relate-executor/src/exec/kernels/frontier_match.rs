@@ -185,20 +185,61 @@ pub(crate) struct FrontierContract<'a> {
     pub(crate) pool: Pool,
 }
 
+/// The clause's row gate: the two proofs that read the entering row and
+/// nothing else, so a clause whose contract compiles once still judges
+/// every entering row on its own bindings. [`compile_frontier`] runs it
+/// over the clause's rows as its first proof; `Err` names the gate that
+/// declined — the caller keeps the unchanged per-row DFS, answers
+/// identical.
+///
+/// Call with the same entering row and flattened MATCH-WHERE conjuncts
+/// the GPM expansion site sees: the allReduce gate reads the inliner's
+/// own extraction against that row, so its answer is exact there.
+pub(crate) fn frontier_row_gate(
+    pattern: &PathPattern,
+    row: &Row,
+    conjuncts: &[Expr],
+) -> Result<(), FrontierDecline> {
+    // The entering row may bind exactly the seed-side variable — the
+    // single-seed frontier's premise. Anything else is a prebound pin
+    // (the legacy exact-trail rule binds a group name to a list) or a
+    // mid-statement clause's outer binding.
+    let (start_node, _) = boundary(pattern).ok_or(FrontierDecline::NfaShape)?;
+    let seed_var = start_node.variable.as_ref();
+    if row
+        .keys()
+        .any(|name| seed_var.is_none_or(|var| var != name.as_str()))
+    {
+        return Err(FrontierDecline::CarryingRow);
+    }
+    // The allReduce conflict (ADR-0478 §2, hard decline): the inliner's
+    // own extraction, against this row — a spec it returns is a group of
+    // this quantification (its qualification rules require exactly that).
+    // The proof reads the conjuncts, so a clause without any skips it: the
+    // extraction allocates, and this gate runs once per entering row.
+    if !conjuncts.is_empty() && !inlined_all_reduces(pattern, row, conjuncts).is_empty() {
+        return Err(FrontierDecline::AllReduceGroup);
+    }
+    Ok(())
+}
+
 /// The frontier family's matcher arm: the plan-time proofs that decide
 /// whether one `MATCH` clause's quantified pattern is frontier-eligible,
 /// returning the compiled artifact. `Err` names the gate that declined —
 /// the caller keeps the unchanged per-row DFS, answers identical.
 ///
-/// Call with the same entering row and flattened MATCH-WHERE conjuncts
-/// the GPM expansion site sees: the allReduce gate reads the inliner's
-/// own extraction against that row, so its answer is exact there.
+/// The contract is the clause's, not a row's: every proof below reads the
+/// pattern, the match mode and the consumer, so one compile serves every
+/// entering row of the clause. The two proofs that do read a row are
+/// [`frontier_row_gate`]'s, run over `rows` here rather than by the
+/// caller: the row gate is the compile's premise, so no entry can build
+/// a contract for a row it never proved.
 pub(crate) fn compile_frontier<'a>(
     graph: &Graph,
     patterns: &'a [PathPattern],
     match_mode: MatchMode,
-    row: &Row,
     conjuncts: &[Expr],
+    rows: &[Row],
     consumer: Consumer,
     stats: &dyn PatternStats,
 ) -> Result<FrontierContract<'a>, FrontierDecline> {
@@ -207,18 +248,15 @@ pub(crate) fn compile_frontier<'a>(
     let [pattern] = patterns else {
         return Err(FrontierDecline::MultiplePatterns);
     };
-    let (start_node, target_node) = boundary(pattern).ok_or(FrontierDecline::NfaShape)?;
-    // The entering row may bind exactly the seed-side variable — the
-    // single-seed frontier's premise. Anything else is a prebound pin
-    // (the legacy exact-trail rule binds a group name to a list) or a
-    // mid-statement clause's outer binding.
-    let seed_var = start_node.variable.as_ref();
-    if row
-        .keys()
-        .any(|name| seed_var.is_none_or(|var| var != name.as_str()))
-    {
-        return Err(FrontierDecline::CarryingRow);
+    // The entering rows' own proofs, before any clause-level proof is
+    // spent: a row binding more than the seed-side variable, or carrying
+    // an inlined allReduce over the quantification, declines the whole
+    // clause — every row falls to the walker together, exactly as the
+    // walker serves them.
+    for row in rows {
+        frontier_row_gate(pattern, row, conjuncts)?;
     }
+    let (start_node, target_node) = boundary(pattern).ok_or(FrontierDecline::NfaShape)?;
     // The mode proofs. The default pool's per-witness mode checks are
     // the emission's (`frontier_emit`): an explicit TRAIL rides the
     // default pool exactly like the unwritten mode, and the CAPPED
@@ -267,12 +305,6 @@ pub(crate) fn compile_frontier<'a>(
         // Unbounded REPEATABLE ELEMENTS keeps its authored rejection
         // (ADR-0478 §5) — declining keeps the DFS path that raises it.
         return Err(FrontierDecline::Mode);
-    }
-    // The allReduce conflict (ADR-0478 §2, hard decline): the inliner's
-    // own extraction, against this row — a spec it returns is a group of
-    // this quantification (its qualification rules require exactly that).
-    if !inlined_all_reduces(pattern, row, conjuncts).is_empty() {
-        return Err(FrontierDecline::AllReduceGroup);
     }
     if !names_unique(pattern) {
         return Err(FrontierDecline::PinnedBinding);
