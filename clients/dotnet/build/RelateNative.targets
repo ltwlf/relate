@@ -1,0 +1,26 @@
+<Project>
+  <!-- Build the native library from this checkout; never download an older release. -->
+  <PropertyGroup>
+    <RelateNativeRuntimeIdentifier Condition="'$(RelateNativeRuntimeIdentifier)' == ''">$(NETCoreSdkRuntimeIdentifier)</RelateNativeRuntimeIdentifier>
+    <_RelateNativeName Condition="$([MSBuild]::IsOSPlatform('Windows'))">relate_ffi.dll</_RelateNativeName>
+    <_RelateNativeName Condition="$([MSBuild]::IsOSPlatform('OSX'))">librelate_ffi.dylib</_RelateNativeName>
+    <_RelateNativeName Condition="$([MSBuild]::IsOSPlatform('Linux'))">librelate_ffi.so</_RelateNativeName>
+    <_RelateUseHostNative Condition="'$(RelateNativeLibraryPath)' == ''">true</_RelateUseHostNative>
+    <RelateNativeLibraryPath Condition="'$(RelateNativeLibraryPath)' == ''">$(RepoRoot)../../target/debug/$(_RelateNativeName)</RelateNativeLibraryPath>
+  </PropertyGroup>
+  <ItemGroup>
+    <None Include="$(RelateNativeLibraryPath)"
+          Link="$([System.IO.Path]::GetFileName('$(RelateNativeLibraryPath)'))"
+          CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest"
+          Visible="false" Pack="true"
+          PackagePath="runtimes/$(RelateNativeRuntimeIdentifier)/native/" />
+  </ItemGroup>
+  <Target Name="CheckRelateNative" BeforeTargets="PrepareForBuild;_GetPackageFiles">
+    <Error Condition="'$(_RelateUseHostNative)' == 'true' And '$(RelateNativeRuntimeIdentifier)' != '$(NETCoreSdkRuntimeIdentifier)'"
+           Text="A different RelateNativeRuntimeIdentifier requires an explicit RelateNativeLibraryPath for that platform." />
+    <Error Condition="!Exists('$(RelateNativeLibraryPath)')"
+           Text="Build the current native library first: cargo build -p relate-ffi. Or pass -p:RelateNativeLibraryPath=/absolute/path/to/the/native/library." />
+    <Error Condition="'$(RelateNativeRuntimeIdentifier)' != 'win-x64' And '$(RelateNativeRuntimeIdentifier)' != 'linux-x64' And '$(RelateNativeRuntimeIdentifier)' != 'linux-arm64' And '$(RelateNativeRuntimeIdentifier)' != 'osx-x64' And '$(RelateNativeRuntimeIdentifier)' != 'osx-arm64'"
+           Text="Set RelateNativeRuntimeIdentifier to the supported RID of the native library: win-x64, linux-x64, linux-arm64, osx-x64 or osx-arm64." />
+  </Target>
+</Project>

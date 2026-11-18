@@ -1,0 +1,14 @@
+<Project>
+  <PropertyGroup>
+    <RepoRoot>$(MSBuildThisFileDirectory)</RepoRoot>
+    <LangVersion>latest</LangVersion>
+    <Nullable>enable</Nullable>
+    <Deterministic>true</Deterministic>
+
+    <Authors>Peter Villadsen</Authors>
+    <Copyright>Copyright (c) 2026 Peter Villadsen</Copyright>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+
+    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
+  </PropertyGroup>
+</Project>
